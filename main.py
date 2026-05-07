@@ -13,6 +13,7 @@ from aiogram.types import (
     CallbackQuery,
     PreCheckoutQuery,
     LabeledPrice,
+    BotCommand,
 )
 from openai import AsyncOpenAI
 
@@ -20,9 +21,6 @@ from openai import AsyncOpenAI
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 ADMIN_IDS = {
@@ -33,10 +31,31 @@ ADMIN_IDS = {
 
 FREE_DAILY_LIMIT = 15
 FREE_WEEKLY_LIMIT = 105
-PRO_DAILY_LIMIT = 1000
 
-PRO_STARS_PRICE = int(os.getenv("PRO_STARS_PRICE", "299"))
-VIP_STARS_PRICE = int(os.getenv("VIP_STARS_PRICE", "1499"))
+PLAN_WEEKLY_LIMITS = {
+    "FREE": 105,
+    "PLUS": 500,
+    "PRO": 1400,
+    "VIP": None,
+}
+
+TARIFFS = {
+    "PLUS": {
+        "title": "PLUS",
+        "description": "500 сообщений в неделю",
+        "prices": {1: 199, 3: 400, 6: 800, 12: 1600},
+    },
+    "PRO": {
+        "title": "PRO",
+        "description": "1400 сообщений в неделю",
+        "prices": {1: 499, 3: 1000, 6: 2000, 12: 3000},
+    },
+    "VIP": {
+        "title": "VIP",
+        "description": "Безлимит",
+        "prices": {1: 1499, 3: 3000, 6: 6000, 12: 9900},
+    },
+}
 
 SPAM_WINDOW_SECONDS = 8
 SPAM_MAX_MESSAGES = 5
@@ -44,6 +63,7 @@ SPAM_BLOCK_SECONDS = 60
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 deepseek_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -53,40 +73,74 @@ deepseek_client = AsyncOpenAI(
 db_pool = None
 
 
-menu = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="💬 Новый чат", callback_data="new_chat"),
-            InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
-        ],
-        [
-            InlineKeyboardButton(text="💎 Тарифы", callback_data="plans"),
-            InlineKeyboardButton(text="🤖 Модель", callback_data="models"),
-        ],
-    ]
-)
+def main_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💬 Новый чат", callback_data="new_chat"),
+                InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
+            ],
+            [
+                InlineKeyboardButton(text="🚀 Премиум", callback_data="premium"),
+                InlineKeyboardButton(text="🤖 Модель", callback_data="models"),
+            ],
+        ]
+    )
 
-plans_menu = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text=f"💎 PRO — {PRO_STARS_PRICE} ⭐", callback_data="buy_pro")],
-        [InlineKeyboardButton(text=f"👑 VIP — {VIP_STARS_PRICE} ⭐", callback_data="buy_vip")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")],
-    ]
-)
 
-models_menu = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text="🧠 ChatGPT 5", callback_data="set_model_gpt")],
-        [InlineKeyboardButton(text="🟣 Claude", callback_data="set_model_claude")],
-        [InlineKeyboardButton(text="🔵 Gemini", callback_data="set_model_gemini")],
-        [InlineKeyboardButton(text="⚫ DeepSeek", callback_data="set_model_deepseek")],
-    ]
-)
+def models_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧠 ChatGPT 5", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="🟣 Claude", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="🔵 Gemini", callback_data="set_model_gemini")],
+            [InlineKeyboardButton(text="⚫ DeepSeek", callback_data="set_model_deepseek")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
+        ]
+    )
+
+
+def tariffs_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⭐ PLUS — 500 сообщений / неделя", callback_data="tariff_PLUS")],
+            [InlineKeyboardButton(text="💎 PRO — 1400 сообщений / неделя", callback_data="tariff_PRO")],
+            [InlineKeyboardButton(text="👑 VIP — безлимит", callback_data="tariff_VIP")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
+        ]
+    )
+
+
+def period_menu(plan: str):
+    prices = TARIFFS[plan]["prices"]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"1 месяц — ⭐ {prices[1]}", callback_data=f"period_{plan}_1")],
+            [InlineKeyboardButton(text=f"3 месяца — ⭐ {prices[3]}", callback_data=f"period_{plan}_3")],
+            [InlineKeyboardButton(text=f"6 месяцев — ⭐ {prices[6]}", callback_data=f"period_{plan}_6")],
+            [InlineKeyboardButton(text=f"12 месяцев — ⭐ {prices[12]}", callback_data=f"period_{plan}_12")],
+            [InlineKeyboardButton(text="← Назад", callback_data="premium")],
+        ]
+    )
+
+
+def payment_method_menu(plan: str, months: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⭐ Оплатить Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
+            [InlineKeyboardButton(text="← Назад", callback_data=f"tariff_{plan}")],
+        ]
+    )
 
 
 def get_week_start():
     today = date.today()
     return today - timedelta(days=today.weekday())
+
+
+def add_months_rough(months: int):
+    return datetime.utcnow() + timedelta(days=30 * months)
 
 
 def is_admin(user_id: int) -> bool:
@@ -104,6 +158,7 @@ async def init_db():
                 username TEXT,
                 first_name TEXT,
                 plan TEXT DEFAULT 'FREE',
+                plan_until TIMESTAMP,
                 selected_model TEXT DEFAULT 'gpt',
                 daily_used INTEGER DEFAULT 0,
                 weekly_used INTEGER DEFAULT 0,
@@ -111,6 +166,11 @@ async def init_db():
                 week_start DATE DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT NOW()
             );
+        """)
+
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS plan_until TIMESTAMP;
         """)
 
         await conn.execute("""
@@ -128,6 +188,7 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 telegram_id BIGINT NOT NULL,
                 plan TEXT NOT NULL,
+                months INTEGER DEFAULT 1,
                 amount INTEGER NOT NULL,
                 currency TEXT NOT NULL,
                 payload TEXT NOT NULL,
@@ -145,6 +206,15 @@ async def init_db():
                 blocked_until BIGINT DEFAULT 0
             );
         """)
+
+
+async def setup_bot_commands():
+    await bot.set_my_commands([
+        BotCommand(command="start", description="👋 Что умеет бот"),
+        BotCommand(command="account", description="👤 Мой профиль"),
+        BotCommand(command="premium", description="🚀 Премиум"),
+        BotCommand(command="deletecontext", description="💬 Удалить контекст"),
+    ])
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -183,6 +253,13 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
                 WHERE telegram_id=$1
             """, telegram_id, week_start)
 
+        if user["plan"] != "FREE" and user["plan_until"] and user["plan_until"] < datetime.utcnow():
+            await conn.execute("""
+                UPDATE users
+                SET plan='FREE', plan_until=NULL
+                WHERE telegram_id=$1
+            """, telegram_id)
+
         return await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
 
@@ -198,10 +275,7 @@ async def check_spam(telegram_id: int):
     now = int(time.time())
 
     async with db_pool.acquire() as conn:
-        state = await conn.fetchrow(
-            "SELECT * FROM spam_state WHERE telegram_id=$1",
-            telegram_id,
-        )
+        state = await conn.fetchrow("SELECT * FROM spam_state WHERE telegram_id=$1", telegram_id)
 
         if not state:
             await conn.execute("""
@@ -247,16 +321,17 @@ async def check_limit(user):
     if plan == "VIP":
         return True, None
 
-    if plan == "PRO":
-        if user["daily_used"] >= PRO_DAILY_LIMIT:
-            return False, "PRO_DAY_LIMIT"
+    if plan == "FREE":
+        if user["daily_used"] >= FREE_DAILY_LIMIT:
+            return False, "FREE_DAY_LIMIT"
+        if user["weekly_used"] >= FREE_WEEKLY_LIMIT:
+            return False, "FREE_WEEK_LIMIT"
         return True, None
 
-    if user["daily_used"] >= FREE_DAILY_LIMIT:
-        return False, "FREE_DAY_LIMIT"
+    weekly_limit = PLAN_WEEKLY_LIMITS.get(plan)
 
-    if user["weekly_used"] >= FREE_WEEKLY_LIMIT:
-        return False, "FREE_WEEK_LIMIT"
+    if weekly_limit is not None and user["weekly_used"] >= weekly_limit:
+        return False, f"{plan}_WEEK_LIMIT"
 
     return True, None
 
@@ -272,12 +347,11 @@ async def increase_usage(telegram_id):
 
 
 async def save_message(telegram_id, role, content):
-    content = content[:12000]
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO messages (telegram_id, role, content)
             VALUES ($1, $2, $3)
-        """, telegram_id, role, content)
+        """, telegram_id, role, content[:12000])
 
 
 async def get_chat_history(telegram_id, limit=12):
@@ -298,13 +372,15 @@ async def clear_chat(telegram_id):
         await conn.execute("DELETE FROM messages WHERE telegram_id=$1", telegram_id)
 
 
-async def set_user_plan(telegram_id: int, plan: str):
+async def activate_plan(telegram_id: int, plan: str, months: int):
+    until = add_months_rough(months)
+
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE users
-            SET plan=$2
+            SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0
             WHERE telegram_id=$1
-        """, telegram_id, plan)
+        """, telegram_id, plan, until)
 
 
 async def user_profile_text(user):
@@ -320,29 +396,44 @@ async def user_profile_text(user):
 
     if plan == "VIP":
         limit_text = "♾ Безлимит"
-    elif plan == "PRO":
-        limit_text = f"{user['daily_used']} / {PRO_DAILY_LIMIT} сегодня"
+    elif plan in {"PLUS", "PRO"}:
+        limit_text = f"{user['weekly_used']} / {PLAN_WEEKLY_LIMITS[plan]} за неделю"
     else:
         limit_text = (
             f"{user['daily_used']} / {FREE_DAILY_LIMIT} сегодня\n"
             f"{user['weekly_used']} / {FREE_WEEKLY_LIMIT} за неделю"
         )
 
+    until_text = "не ограничено"
+    if user["plan_until"]:
+        until_text = user["plan_until"].strftime("%d.%m.%Y")
+
     return (
-        "👤 Ваш профиль\n\n"
+        "👤 Мой профиль\n\n"
         f"Тариф: {plan}\n"
+        f"Активен до: {until_text}\n"
         f"Модель: {current_model}\n\n"
         f"Использование:\n{limit_text}"
     )
 
 
-async def send_long_text(message_or_callback_message, text: str, reply_markup=None):
-    chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)]
-    for i, chunk in enumerate(chunks):
-        await message_or_callback_message.answer(
-            chunk,
-            reply_markup=reply_markup if i == len(chunks) - 1 else None,
-        )
+def welcome_text():
+    return (
+        "👋 Добро пожаловать в @GPTclaudeAIbot\n\n"
+        "Бот для работы с лучшими нейросетями в одном месте.\n\n"
+        "📝 Генерация текста:\n"
+        "• ChatGPT\n"
+        "• Claude\n"
+        "• Gemini\n"
+        "• DeepSeek\n\n"
+        "🧠 Что можно делать:\n"
+        "• писать тексты, посты и письма\n"
+        "• решать рабочие задачи\n"
+        "• переводить и объяснять\n"
+        "• анализировать идеи\n"
+        "• вести диалог с памятью контекста\n\n"
+        "Выберите действие в меню или просто напишите вопрос."
+    )
 
 
 async def ai_router(selected_model: str, messages: list[dict]):
@@ -365,170 +456,147 @@ async def ai_router(selected_model: str, messages: list[dict]):
         )
         return response.choices[0].message.content
 
-    if selected_model == "claude":
-        if not ANTHROPIC_API_KEY:
-            return await openai_answer(full_messages, "gpt-4o-mini")
-        return await openai_answer(full_messages, "gpt-4o-mini")
-
-    if selected_model == "gemini":
-        if not GOOGLE_API_KEY:
-            return await openai_answer(full_messages, "gpt-4o-mini")
-        return await openai_answer(full_messages, "gpt-4o-mini")
-
-    return await openai_answer(full_messages, "gpt-4o-mini")
-
-
-async def openai_answer(messages: list[dict], model: str):
     response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
+        model="gpt-4o-mini",
+        messages=full_messages,
         temperature=0.7,
     )
     return response.choices[0].message.content
 
 
+async def safe_edit(callback: CallbackQuery, text: str, reply_markup=None):
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        await callback.message.answer(text, reply_markup=reply_markup)
+
+
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await get_or_create_user(message)
+    await message.answer(welcome_text(), reply_markup=main_menu())
 
+
+@dp.message(Command("account"))
+async def account_command(message: Message):
+    user = await get_or_create_user(message)
+    await message.answer(await user_profile_text(user), reply_markup=main_menu())
+
+
+@dp.message(Command("premium"))
+async def premium_command(message: Message):
     await message.answer(
-        "🚀 Добро пожаловать в ChatGPT + Claude + Gemini + DeepSeek!\n\n"
-        "Напишите любой вопрос, и я отвечу с помощью AI.",
-        reply_markup=menu,
+        "🚀 Выберите тариф для покупки:\n\n"
+        "⭐ PLUS — 500 сообщений в неделю\n"
+        "💎 PRO — 1400 сообщений в неделю\n"
+        "👑 VIP — безлимит",
+        reply_markup=tariffs_menu(),
     )
 
 
-@dp.message(Command("admin"))
-async def admin_handler(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
-        vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
-        total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
-        today_users = await conn.fetchval("""
-            SELECT COUNT(*) FROM users
-            WHERE created_at::date = CURRENT_DATE
-        """)
-
-    await message.answer(
-        "🛠 Админка\n\n"
-        f"Пользователей всего: {total_users}\n"
-        f"Новых сегодня: {today_users}\n"
-        f"PRO: {pro_users}\n"
-        f"VIP: {vip_users}\n"
-        f"Сообщений в памяти: {total_messages}\n\n"
-        "Команды:\n"
-        "/setpro telegram_id\n"
-        "/setvip telegram_id\n"
-        "/setfree telegram_id\n"
-        "/stats"
-    )
+@dp.message(Command("deletecontext"))
+async def delete_context_command(message: Message):
+    await clear_chat(message.from_user.id)
+    await message.answer("💬 Контекст очищен. Новый чат начат.", reply_markup=main_menu())
 
 
-@dp.message(Command("stats"))
-async def stats_handler(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT plan, COUNT(*) AS count
-            FROM users
-            GROUP BY plan
-            ORDER BY plan
-        """)
-
-    text = "📊 Статистика тарифов\n\n"
-    for row in rows:
-        text += f"{row['plan']}: {row['count']}\n"
-
-    await message.answer(text)
-
-
-async def admin_set_plan(message: Message, plan: str):
-    if not is_admin(message.from_user.id):
-        return
-
-    parts = message.text.split()
-    if len(parts) != 2 or not parts[1].isdigit():
-        await message.answer(f"Формат: /set{plan.lower()} telegram_id")
-        return
-
-    telegram_id = int(parts[1])
-    async with db_pool.acquire() as conn:
-        exists = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE telegram_id=$1",
-            telegram_id,
-        )
-
-    if not exists:
-        await message.answer("Пользователь не найден.")
-        return
-
-    await set_user_plan(telegram_id, plan)
-    await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}.")
-
-
-@dp.message(Command("setpro"))
-async def setpro_handler(message: Message):
-    await admin_set_plan(message, "PRO")
-
-
-@dp.message(Command("setvip"))
-async def setvip_handler(message: Message):
-    await admin_set_plan(message, "VIP")
-
-
-@dp.message(Command("setfree"))
-async def setfree_handler(message: Message):
-    await admin_set_plan(message, "FREE")
+@dp.callback_query(F.data == "back_main")
+async def back_main_callback(callback: CallbackQuery):
+    await callback.answer()
+    await safe_edit(callback, welcome_text(), reply_markup=main_menu())
 
 
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery):
+    await callback.answer()
+
     user = await get_or_create_user_by_data(
         telegram_id=callback.from_user.id,
         username=callback.from_user.username,
         first_name=callback.from_user.first_name,
     )
 
-    await callback.message.answer(await user_profile_text(user), reply_markup=menu)
+    await safe_edit(callback, await user_profile_text(user), reply_markup=main_menu())
+
+
+@dp.callback_query(F.data.in_({"premium", "plans"}))
+async def premium_callback(callback: CallbackQuery):
     await callback.answer()
 
-
-@dp.callback_query(F.data == "plans")
-async def plans_callback(callback: CallbackQuery):
-    await callback.message.answer(
-        "💎 Тарифы\n\n"
-        "FREE — 15 сообщений в день / 105 в неделю\n"
-        f"PRO — {PRO_DAILY_LIMIT} сообщений в день\n"
-        "VIP — безлимит\n\n"
-        "Оплата доступна через Telegram Stars.",
-        reply_markup=plans_menu,
+    await safe_edit(
+        callback,
+        "🚀 Выберите тариф для покупки:\n\n"
+        "⭐ PLUS — 500 сообщений в неделю\n"
+        "💎 PRO — 1400 сообщений в неделю\n"
+        "👑 VIP — безлимит",
+        reply_markup=tariffs_menu(),
     )
+
+
+@dp.callback_query(F.data.startswith("tariff_"))
+async def tariff_callback(callback: CallbackQuery):
     await callback.answer()
 
+    plan = callback.data.replace("tariff_", "")
 
-@dp.callback_query(F.data.in_({"buy_pro", "buy_vip"}))
-async def buy_plan_callback(callback: CallbackQuery):
-    plan = "PRO" if callback.data == "buy_pro" else "VIP"
-    price = PRO_STARS_PRICE if plan == "PRO" else VIP_STARS_PRICE
-    payload = f"plan:{plan}:user:{callback.from_user.id}:ts:{int(time.time())}"
+    if plan not in TARIFFS:
+        return
+
+    tariff = TARIFFS[plan]
+
+    await safe_edit(
+        callback,
+        f"🚀 {tariff['title']}\n\n"
+        f"{tariff['description']}\n\n"
+        "Выберите период подписки:",
+        reply_markup=period_menu(plan),
+    )
+
+
+@dp.callback_query(F.data.startswith("period_"))
+async def period_callback(callback: CallbackQuery):
+    await callback.answer()
+
+    _, plan, months = callback.data.split("_")
+    months = int(months)
+
+    if plan not in TARIFFS:
+        return
+
+    price = TARIFFS[plan]["prices"][months]
+
+    await safe_edit(
+        callback,
+        f"⭐ Подтвердите оплату Telegram Stars:\n\n"
+        f"Тариф: {plan}\n"
+        f"Период: {months} мес.\n"
+        f"Цена: ⭐ {price}",
+        reply_markup=payment_method_menu(plan, months),
+    )
+
+
+@dp.callback_query(F.data.startswith("pay_stars_"))
+async def pay_stars_callback(callback: CallbackQuery):
+    await callback.answer()
+
+    _, _, plan, months = callback.data.split("_")
+    months = int(months)
+
+    if plan not in TARIFFS:
+        return
+
+    price = TARIFFS[plan]["prices"][months]
+    payload = f"plan:{plan}:months:{months}:user:{callback.from_user.id}:ts:{int(time.time())}"
 
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
-        title=f"Тариф {plan}",
-        description=f"Активация тарифа {plan} для AI-бота.",
+        title=f"{plan} на {months} мес.",
+        description=f"{TARIFFS[plan]['description']}. Подписка на {months} мес.",
         payload=payload,
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label=f"Тариф {plan}", amount=price)],
+        prices=[LabeledPrice(label=f"{plan} на {months} мес.", amount=price)],
     )
-
-    await callback.answer()
 
 
 @dp.pre_checkout_query()
@@ -548,25 +616,30 @@ async def successful_payment_handler(message: Message):
     payload = payment.invoice_payload
 
     parts = payload.split(":")
-    plan = "PRO"
+    plan = None
+    months = 1
 
-    if len(parts) >= 2 and parts[0] == "plan":
+    try:
         plan = parts[1]
+        months = int(parts[3])
+    except Exception:
+        pass
 
-    if plan not in {"PRO", "VIP"}:
+    if plan not in TARIFFS:
         await message.answer("⚠️ Платёж получен, но тариф не распознан. Напишите администратору.")
         return
 
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO payments (
-                telegram_id, plan, amount, currency, payload,
+                telegram_id, plan, months, amount, currency, payload,
                 telegram_payment_charge_id, provider_payment_charge_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """,
             message.from_user.id,
             plan,
+            months,
             payment.total_amount,
             payment.currency,
             payload,
@@ -574,27 +647,25 @@ async def successful_payment_handler(message: Message):
             payment.provider_payment_charge_id,
         )
 
-        await conn.execute("""
-            UPDATE users
-            SET plan=$2
-            WHERE telegram_id=$1
-        """, message.from_user.id, plan)
+    await activate_plan(message.from_user.id, plan, months)
 
     await message.answer(
         f"✅ Оплата прошла успешно!\n\n"
-        f"Тариф {plan} активирован.",
-        reply_markup=menu,
+        f"Тариф {plan} активирован на {months} мес.",
+        reply_markup=main_menu(),
     )
 
 
 @dp.callback_query(F.data == "models")
 async def models_callback(callback: CallbackQuery):
-    await callback.message.answer("🤖 Выберите модель:", reply_markup=models_menu)
     await callback.answer()
+    await safe_edit(callback, "🤖 Выберите модель:", reply_markup=models_menu())
 
 
 @dp.callback_query(F.data.startswith("set_model_"))
 async def set_model_callback(callback: CallbackQuery):
+    await callback.answer()
+
     model = callback.data.replace("set_model_", "")
 
     async with db_pool.acquire() as conn:
@@ -611,24 +682,93 @@ async def set_model_callback(callback: CallbackQuery):
         "deepseek": "⚫ DeepSeek",
     }
 
-    await callback.message.answer(
+    await safe_edit(
+        callback,
         f"✅ Модель переключена:\n\n{names.get(model)}",
-        reply_markup=menu,
+        reply_markup=main_menu(),
     )
-
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "new_chat")
 async def new_chat_callback(callback: CallbackQuery):
+    await callback.answer()
     await clear_chat(callback.from_user.id)
 
-    await callback.message.answer(
+    await safe_edit(
+        callback,
         "💬 Новый чат начат.\n\nКонтекст очищен.",
-        reply_markup=menu,
+        reply_markup=main_menu(),
     )
 
-    await callback.answer()
+
+@dp.message(Command("admin"))
+async def admin_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
+        pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
+        vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
+        total_payments = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
+
+    await message.answer(
+        "🛠 Админка\n\n"
+        f"Пользователей: {total_users}\n"
+        f"PLUS: {plus_users}\n"
+        f"PRO: {pro_users}\n"
+        f"VIP: {vip_users}\n"
+        f"Stars получено: {total_payments}\n\n"
+        "Команды:\n"
+        "/setplus telegram_id\n"
+        "/setpro telegram_id\n"
+        "/setvip telegram_id\n"
+        "/setfree telegram_id"
+    )
+
+
+async def admin_set_plan(message: Message, plan: str):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат команды: /setpro telegram_id")
+        return
+
+    telegram_id = int(parts[1])
+    until = add_months_rough(1) if plan != "FREE" else None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users
+            SET plan=$2, plan_until=$3
+            WHERE telegram_id=$1
+        """, telegram_id, plan, until)
+
+    await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}.")
+
+
+@dp.message(Command("setplus"))
+async def setplus_handler(message: Message):
+    await admin_set_plan(message, "PLUS")
+
+
+@dp.message(Command("setpro"))
+async def setpro_handler(message: Message):
+    await admin_set_plan(message, "PRO")
+
+
+@dp.message(Command("setvip"))
+async def setvip_handler(message: Message):
+    await admin_set_plan(message, "VIP")
+
+
+@dp.message(Command("setfree"))
+async def setfree_handler(message: Message):
+    await admin_set_plan(message, "FREE")
 
 
 @dp.message(F.text)
@@ -636,6 +776,7 @@ async def chat_handler(message: Message):
     user = await get_or_create_user(message)
 
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
+
     if not spam_allowed:
         await message.answer(
             f"🛡 Слишком много сообщений подряд.\n\n"
@@ -646,22 +787,11 @@ async def chat_handler(message: Message):
     allowed, reason = await check_limit(user)
 
     if not allowed:
-        if reason == "FREE_DAY_LIMIT":
-            text = (
-                "⏳ Дневной лимит FREE на сегодня закончился.\n\n"
-                "Завтра сообщения обновятся автоматически.\n\n"
-                "Можно перейти на PRO в разделе «Тарифы»."
-            )
-        elif reason == "FREE_WEEK_LIMIT":
-            text = (
-                "⏳ Недельный лимит FREE закончился.\n\n"
-                "Лимит обновится на следующей неделе.\n\n"
-                "Можно перейти на PRO в разделе «Тарифы»."
-            )
-        else:
-            text = "⏳ Дневной лимит PRO на сегодня закончился."
-
-        await message.answer(text, reply_markup=plans_menu)
+        await message.answer(
+            "⏳ Лимит сообщений закончился.\n\n"
+            "Вы можете перейти на PLUS, PRO или VIP.",
+            reply_markup=tariffs_menu(),
+        )
         return
 
     wait_message = await message.answer("Печатает ответ...")
@@ -682,8 +812,8 @@ async def chat_handler(message: Message):
             await wait_message.edit_text(answer)
         else:
             await wait_message.edit_text(answer[:3900])
-            for chunk in [answer[i:i + 3900] for i in range(3900, len(answer), 3900)]:
-                await message.answer(chunk)
+            for i in range(3900, len(answer), 3900):
+                await message.answer(answer[i:i + 3900])
 
     except Exception as e:
         print(f"AI ERROR: {e}")
@@ -705,6 +835,7 @@ async def main():
         raise RuntimeError("DATABASE_URL is missing")
 
     await init_db()
+    await setup_bot_commands()
 
     print("DATABASE CONNECTED")
     print("BOT STARTED")
