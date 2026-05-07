@@ -13,7 +13,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-FREE_DAILY_LIMIT = 14
+FREE_DAILY_LIMIT = 30
 FREE_WEEKLY_LIMIT = 100
 PRO_DAILY_LIMIT = 1000
 
@@ -178,7 +178,7 @@ async def profile_handler(message: Message):
 async def plans_handler(message: Message):
     await message.answer(
         "💎 Тарифы\n\n"
-        "FREE — 100 сообщений в неделю\n"
+        "FREE — 210 сообщений в неделю\n"
         "PRO — 1000 сообщений в день\n"
         "VIP — безлимит\n\n"
         "Оплата Telegram Stars будет добавлена следующим шагом.",
@@ -189,7 +189,7 @@ async def plans_handler(message: Message):
 @dp.message(F.text == "🤖 Модель")
 async def model_handler(message: Message):
     await message.answer(
-        "🤖 Сейчас активна модель: GPT\n\n"
+        "🤖 Сейчас активна модель: GPT 5\n\n"
         "Скоро добавим выбор:\n"
         "• GPT\n"
         "• Claude\n"
@@ -240,7 +240,7 @@ async def chat_handler(message: Message):
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt 5",
             messages=[
                 {
                     "role": "system",
