@@ -43,12 +43,12 @@ PLAN_WEEKLY_LIMITS = {
 TARIFFS = {
     "PLUS": {
         "title": "PLUS",
-        "description": "500 сообщений в неделю",
+        "description": "500 запросов в неделю",
         "prices": {1: 199, 3: 400, 6: 800, 12: 1600},
     },
     "PRO": {
         "title": "PRO",
-        "description": "1400 сообщений в неделю",
+        "description": "1400 запросов в неделю",
         "prices": {1: 499, 3: 1000, 6: 2000, 12: 3000},
     },
     "VIP": {
@@ -81,10 +81,13 @@ def main_menu():
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
-                InlineKeyboardButton(text="🚀 Премиум", callback_data="premium"),
+                InlineKeyboardButton(text="💳 Купить подписку", callback_data="premium"),
             ],
             [
                 InlineKeyboardButton(text="🤖 Модель", callback_data="models"),
+            ],
+            [
+                InlineKeyboardButton(text="🧠 Наши каналы", callback_data="channels"),
             ],
         ]
     )
@@ -93,10 +96,9 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🧠 ChatGPT 5", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="🧠 ChatGPT", callback_data="set_model_gpt")],
             [InlineKeyboardButton(text="🟣 Claude", callback_data="set_model_claude")],
-            [InlineKeyboardButton(text="🔵 Gemini", callback_data="set_model_gemini")],
-            [InlineKeyboardButton(text="⚫ DeepSeek", callback_data="set_model_deepseek")],
+            [InlineKeyboardButton(text="🍌 Nano Banana", callback_data="set_model_nanobanana")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -105,8 +107,8 @@ def models_menu():
 def tariffs_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⭐ PLUS — 500 сообщений / неделя", callback_data="tariff_PLUS")],
-            [InlineKeyboardButton(text="💎 PRO — 1400 сообщений / неделя", callback_data="tariff_PRO")],
+            [InlineKeyboardButton(text="⭐ PLUS — 500 запросов / неделя", callback_data="tariff_PLUS")],
+            [InlineKeyboardButton(text="💎 PRO — 1400 запросов / неделя", callback_data="tariff_PRO")],
             [InlineKeyboardButton(text="👑 VIP — безлимит", callback_data="tariff_VIP")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
@@ -155,15 +157,12 @@ def welcome_text():
         "Ваш AI-бот для работы с нейросетями в одном месте.\n\n"
         "📝 Генерация текста:\n"
         "• ChatGPT\n"
-        "• Claude\n"
-        "• Gemini\n"
-        "• DeepSeek\n\n"
-        "🧠 Что можно делать:\n"
-        "• писать тексты, посты и письма\n"
-        "• решать рабочие задачи\n"
-        "• переводить и объяснять\n"
-        "• анализировать идеи\n"
-        "• вести диалог с памятью контекста\n\n"
+        "• Claude\n\n"
+        "🌇 Генерация изображений:\n"
+        "• Nano Banana Pro\n\n"
+        "🧠 Наши каналы:\n"
+        "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
+        "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>\n\n"
         "Напишите вопрос или выберите действие ниже."
     )
 
@@ -453,11 +452,10 @@ async def activate_plan(telegram_id: int, plan: str, months: int):
 
 async def user_profile_text(user):
     model_names = {
-        "gpt": "ChatGPT 5",
-        "claude": "Claude",
-        "gemini": "Gemini",
-        "deepseek": "DeepSeek",
-    }
+    "gpt": "ChatGPT",
+    "claude": "Claude",
+    "nanobanana": "Nano Banana",
+}
 
     plan = user["plan"] or "FREE"
     current_model = model_names.get(user["selected_model"], "ChatGPT 5")
@@ -482,15 +480,12 @@ async def user_profile_text(user):
     if plan != "FREE" and user["plan_until"]:
         text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
 
-    text += (
-        "Нужно больше? Подключите /premium\n\n"
-        "🚀 PLUS:\n"
-        "└ 500 запросов в неделю\n\n"
-        "💎 PRO:\n"
-        "└ 1400 запросов в неделю\n\n"
-        "👑 VIP:\n"
-        "└ безлимит"
-    )
+  text += (
+    "Нужно больше? 🚀 Выберите тариф для покупки:\n\n"
+    "⭐ PLUS — 500 запросов в неделю\n"
+    "💎 PRO — 1400 запросов в неделю\n"
+    "👑 VIP — безлимит"
+)
 
     return text
 
@@ -551,7 +546,7 @@ async def start_handler(message: Message):
 
     await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
-    await message.answer(welcome_text(), reply_markup=main_menu())
+    await message.answer(welcome_text(), reply_markup=main_menu(), parse_mode="HTML")
 
 
 @dp.message(Command("account"))
@@ -565,10 +560,10 @@ async def account_command(message: Message):
 async def premium_command(message: Message):
     await log_event(message.from_user.id, "premium_open")
     await message.answer(
-        "🚀 Выберите тариф для покупки:\n\n"
-        "⭐ PLUS — 500 сообщений в неделю\n"
-        "💎 PRO — 1400 сообщений в неделю\n"
-        "👑 VIP — безлимит",
+"💳 Купить подписку\n\n"
+"⭐ PLUS — 500 запросов в неделю\n"
+"💎 PRO — 1400 запросов в неделю\n"
+"👑 VIP — безлимит",
         reply_markup=tariffs_menu(),
     )
 
@@ -587,6 +582,24 @@ async def back_main_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery):
+    @dp.callback_query(F.data == "channels")
+async def channels_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "channels_open")
+
+    await safe_edit_or_send(
+        callback,
+        "🧠 Наши каналы:\n\n"
+        "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
+        "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📰 Топор Live 1.0", url="https://t.me/ToporLive1_0")],
+                [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNews")],
+                [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
+            ]
+        ),
+    )    
     await callback.answer("Открываю профиль...")
 
     user = await get_or_create_user_by_data(
@@ -606,10 +619,10 @@ async def premium_callback(callback: CallbackQuery):
 
     await safe_edit_or_send(
         callback,
-        "🚀 Выберите тариф для покупки:\n\n"
-        "⭐ PLUS — 500 сообщений в неделю\n"
-        "💎 PRO — 1400 сообщений в неделю\n"
-        "👑 VIP — безлимит",
+"💳 Купить подписку\n\n"
+"⭐ PLUS — 500 запросов в неделю\n"
+"💎 PRO — 1400 запросов в неделю\n"
+"👑 VIP — безлимит",
         reply_markup=tariffs_menu(),
     )
 
@@ -765,12 +778,11 @@ async def set_model_callback(callback: CallbackQuery):
 
     await log_event(callback.from_user.id, "model_select", model)
 
-    names = {
-        "gpt": "🧠 ChatGPT 5",
-        "claude": "🟣 Claude",
-        "gemini": "🔵 Gemini",
-        "deepseek": "⚫ DeepSeek",
-    }
+ names = {
+    "gpt": "🧠 ChatGPT",
+    "claude": "🟣 Claude",
+    "nanobanana": "🍌 Nano Banana",
+}
 
     await safe_edit_or_send(
         callback,
