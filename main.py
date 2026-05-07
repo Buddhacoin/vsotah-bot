@@ -89,7 +89,7 @@ def main_menu():
                 InlineKeyboardButton(text="💳 Купить подписку", callback_data="premium"),
             ],
             [
-                InlineKeyboardButton(text="🤖 Модель", callback_data="models"),
+                InlineKeyboardButton(text="🤖 Выбрать нейросеть", callback_data="models"),
             ],
             [
                 InlineKeyboardButton(text="🧠 Наши каналы", callback_data="channels"),
@@ -123,7 +123,7 @@ def tariffs_menu():
 def channels_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📰 Топор Live 1.0", url="https://t.me/ToporLive1_0")],
+            [InlineKeyboardButton(text="⚡ Молния Live", url="https://t.me/MolniyaLiveNews")],
             [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNewsSupport")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
@@ -176,7 +176,7 @@ def welcome_text():
         "🌇 Генерация изображений:\n"
         "• Nano Banana Pro\n\n"
         "🧠 Наши каналы:\n"
-        "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
+        "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>\n"
         "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>\n\n"
         "Напишите вопрос или выберите действие ниже."
     )
@@ -194,7 +194,7 @@ def premium_text():
 def channels_text():
     return (
         "🧠 Наши каналы:\n\n"
-        "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
+        "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>\n"
         "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"
     )
 
@@ -288,6 +288,7 @@ async def setup_bot_info():
         BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
+        BotCommand(command="models", description="🤖 Выбрать нейросеть"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
@@ -623,6 +624,12 @@ async def premium_command(message: Message):
     )
 
 
+@dp.message(Command("models"))
+async def models_command(message: Message):
+    await log_event(message.from_user.id, "models_command")
+    await message.answer("🤖 Выберите нейросеть:", reply_markup=models_menu())
+
+
 @dp.message(Command("channels"))
 async def channels_command(message: Message):
     await log_event(message.from_user.id, "channels_command")
@@ -683,6 +690,13 @@ async def premium_callback(callback: CallbackQuery):
         premium_text(),
         reply_markup=tariffs_menu(),
     )
+
+
+@dp.callback_query(F.data == "models")
+async def models_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "models_open")
+    await safe_edit_or_send(callback, "🤖 Выберите нейросеть:", reply_markup=models_menu())
 
 
 @dp.callback_query(F.data.startswith("tariff_"))
@@ -814,13 +828,6 @@ async def successful_payment_handler(message: Message):
     )
 
 
-@dp.callback_query(F.data == "models")
-async def models_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "models_open")
-    await safe_edit_or_send(callback, "🤖 Выберите модель:", reply_markup=models_menu())
-
-
 @dp.callback_query(F.data.startswith("set_model_"))
 async def set_model_callback(callback: CallbackQuery):
     await callback.answer()
@@ -854,7 +861,7 @@ async def set_model_callback(callback: CallbackQuery):
 
     await safe_edit_or_send(
         callback,
-        f"✅ Модель переключена:\n\n{names.get(model)}",
+        f"✅ Нейросеть выбрана:\n\n{names.get(model)}",
         reply_markup=main_menu(),
     )
 
