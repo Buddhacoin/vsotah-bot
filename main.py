@@ -281,7 +281,7 @@ async def chat_handler(message: Message):
         await message.answer(text, reply_markup=menu)
         return
 
-    wait_message = await message.answer("💭 Думаю...")
+    wait_message = await message.answer("Печатает ответ...")
 
     try:
         await save_message(message.from_user.id, "user", message.text)
