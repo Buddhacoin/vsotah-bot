@@ -15,6 +15,7 @@ from aiogram.types import (
     PreCheckoutQuery,
     LabeledPrice,
     BotCommand,
+    LinkPreviewOptions,
 )
 from openai import AsyncOpenAI
 
@@ -76,6 +77,10 @@ db_pool = None
 recent_starts = {}
 
 
+def no_preview():
+    return LinkPreviewOptions(is_disabled=True)
+
+
 def main_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -119,7 +124,7 @@ def channels_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📰 Топор Live 1.0", url="https://t.me/ToporLive1_0")],
-            [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNews")],
+            [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNewsSupport")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -172,7 +177,7 @@ def welcome_text():
         "• Nano Banana Pro\n\n"
         "🧠 Наши каналы:\n"
         "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
-        "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>\n\n"
+        "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>\n\n"
         "Напишите вопрос или выберите действие ниже."
     )
 
@@ -190,7 +195,7 @@ def channels_text():
     return (
         "🧠 Наши каналы:\n\n"
         "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
-        "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>"
+        "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"
     )
 
 
@@ -283,6 +288,7 @@ async def setup_bot_info():
         BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
+        BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
 
@@ -510,7 +516,7 @@ async def user_profile_text(user):
         text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
 
     text += (
-        "Нужно больше? 🚀 Выберите тариф для покупки:\n\n"
+        "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
         "⭐ PLUS — 500 запросов в неделю\n"
         "💎 PRO — 1400 запросов в неделю\n"
         "👑 VIP — безлимит"
@@ -565,9 +571,19 @@ async def send_ai_error_to_admin(error_text: str):
 
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
     try:
-        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await callback.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            link_preview_options=no_preview(),
+        )
     except Exception:
-        await callback.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await callback.message.answer(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            link_preview_options=no_preview(),
+        )
 
 
 @dp.message(CommandStart())
@@ -582,7 +598,13 @@ async def start_handler(message: Message):
 
     await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
-    await message.answer(welcome_text(), reply_markup=main_menu(), parse_mode="HTML")
+
+    await message.answer(
+        welcome_text(),
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+        link_preview_options=no_preview(),
+    )
 
 
 @dp.message(Command("account"))
@@ -598,6 +620,17 @@ async def premium_command(message: Message):
     await message.answer(
         premium_text(),
         reply_markup=tariffs_menu(),
+    )
+
+
+@dp.message(Command("channels"))
+async def channels_command(message: Message):
+    await log_event(message.from_user.id, "channels_command")
+    await message.answer(
+        channels_text(),
+        reply_markup=channels_menu(),
+        parse_mode="HTML",
+        link_preview_options=no_preview(),
     )
 
 
