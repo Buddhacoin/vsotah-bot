@@ -13,8 +13,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-FREE_DAILY_LIMIT = 30
-FREE_WEEKLY_LIMIT = 100
+FREE_DAILY_LIMIT = 15
+FREE_WEEKLY_LIMIT = 105
 PRO_DAILY_LIMIT = 1000
 
 bot = Bot(token=BOT_TOKEN)
@@ -178,7 +178,7 @@ async def profile_handler(message: Message):
 async def plans_handler(message: Message):
     await message.answer(
         "💎 Тарифы\n\n"
-        "FREE — 210 сообщений в неделю\n"
+        "FREE — 105 сообщений в неделю\n"
         "PRO — 1000 сообщений в день\n"
         "VIP — безлимит\n\n"
         "Оплата Telegram Stars будет добавлена следующим шагом.",
