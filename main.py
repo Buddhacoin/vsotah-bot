@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import traceback
 from datetime import date, datetime, timedelta
 
 import asyncpg
@@ -65,6 +66,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
 deepseek_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com",
@@ -147,6 +149,25 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+def welcome_text():
+    return (
+        "👋 Добро пожаловать в @GPTclaudeAIbot\n\n"
+        "Ваш AI-бот для работы с нейросетями в одном месте.\n\n"
+        "📝 Генерация текста:\n"
+        "• ChatGPT\n"
+        "• Claude\n"
+        "• Gemini\n"
+        "• DeepSeek\n\n"
+        "🧠 Что можно делать:\n"
+        "• писать тексты, посты и письма\n"
+        "• решать рабочие задачи\n"
+        "• переводить и объяснять\n"
+        "• анализировать идеи\n"
+        "• вести диалог с памятью контекста\n\n"
+        "Напишите вопрос или выберите действие ниже."
+    )
+
+
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
@@ -158,7 +179,6 @@ async def init_db():
                 username TEXT,
                 first_name TEXT,
                 plan TEXT DEFAULT 'FREE',
-                plan_until TIMESTAMP,
                 selected_model TEXT DEFAULT 'gpt',
                 daily_used INTEGER DEFAULT 0,
                 weekly_used INTEGER DEFAULT 0,
@@ -168,10 +188,12 @@ async def init_db():
             );
         """)
 
-        await conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS plan_until TIMESTAMP;
-        """)
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_until TIMESTAMP;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_model TEXT DEFAULT 'gpt';")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_used INTEGER DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_used INTEGER DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS day_start DATE DEFAULT CURRENT_DATE;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS week_start DATE DEFAULT CURRENT_DATE;")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
@@ -188,7 +210,6 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 telegram_id BIGINT NOT NULL,
                 plan TEXT NOT NULL,
-                months INTEGER DEFAULT 1,
                 amount INTEGER NOT NULL,
                 currency TEXT NOT NULL,
                 payload TEXT NOT NULL,
@@ -197,6 +218,8 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
+
+        await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS months INTEGER DEFAULT 1;")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS spam_state (
@@ -208,13 +231,24 @@ async def init_db():
         """)
 
 
-async def setup_bot_commands():
+async def setup_bot_info():
     await bot.set_my_commands([
         BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="🚀 Премиум"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
+
+    try:
+        await bot.set_my_description(
+            "AI-бот для работы с ChatGPT, Claude, Gemini и DeepSeek. "
+            "Пишите задачи, тексты, идеи и вопросы — бот поможет."
+        )
+        await bot.set_my_short_description(
+            "ChatGPT, Claude, Gemini и DeepSeek в Telegram"
+        )
+    except Exception as e:
+        print(f"BOT DESCRIPTION ERROR: {e}")
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -252,6 +286,8 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
                 SET weekly_used=0, week_start=$2
                 WHERE telegram_id=$1
             """, telegram_id, week_start)
+
+        user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
         if user["plan"] != "FREE" and user["plan_until"] and user["plan_until"] < datetime.utcnow():
             await conn.execute("""
@@ -354,7 +390,7 @@ async def save_message(telegram_id, role, content):
         """, telegram_id, role, content[:12000])
 
 
-async def get_chat_history(telegram_id, limit=12):
+async def get_chat_history(telegram_id, limit=10):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
@@ -364,7 +400,14 @@ async def get_chat_history(telegram_id, limit=12):
             LIMIT $2
         """, telegram_id, limit)
 
-    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+    history = []
+    for row in reversed(rows):
+        role = row["role"]
+        if role not in {"user", "assistant", "system"}:
+            continue
+        history.append({"role": role, "content": row["content"]})
+
+    return history
 
 
 async def clear_chat(telegram_id):
@@ -391,7 +434,7 @@ async def user_profile_text(user):
         "deepseek": "DeepSeek",
     }
 
-    plan = user["plan"]
+    plan = user["plan"] or "FREE"
     current_model = model_names.get(user["selected_model"], "ChatGPT 5")
 
     if plan == "VIP":
@@ -404,7 +447,7 @@ async def user_profile_text(user):
             f"{user['weekly_used']} / {FREE_WEEKLY_LIMIT} за неделю"
         )
 
-    until_text = "не ограничено"
+    until_text = "—"
     if user["plan_until"]:
         until_text = user["plan_until"].strftime("%d.%m.%Y")
 
@@ -417,27 +460,8 @@ async def user_profile_text(user):
     )
 
 
-def welcome_text():
-    return (
-        "👋 Добро пожаловать в @GPTclaudeAIbot\n\n"
-        "Бот для работы с лучшими нейросетями в одном месте.\n\n"
-        "📝 Генерация текста:\n"
-        "• ChatGPT\n"
-        "• Claude\n"
-        "• Gemini\n"
-        "• DeepSeek\n\n"
-        "🧠 Что можно делать:\n"
-        "• писать тексты, посты и письма\n"
-        "• решать рабочие задачи\n"
-        "• переводить и объяснять\n"
-        "• анализировать идеи\n"
-        "• вести диалог с памятью контекста\n\n"
-        "Выберите действие в меню или просто напишите вопрос."
-    )
-
-
 async def ai_router(selected_model: str, messages: list[dict]):
-    system = {
+    system_message = {
         "role": "system",
         "content": (
             "Ты профессиональный AI-ассистент. "
@@ -446,7 +470,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
         ),
     }
 
-    full_messages = [system, *messages]
+    full_messages = [system_message, *messages]
 
     if selected_model == "deepseek" and deepseek_client:
         response = await deepseek_client.chat.completions.create(
@@ -461,10 +485,24 @@ async def ai_router(selected_model: str, messages: list[dict]):
         messages=full_messages,
         temperature=0.7,
     )
+
     return response.choices[0].message.content
 
 
-async def safe_edit(callback: CallbackQuery, text: str, reply_markup=None):
+async def send_ai_error_to_admin(error_text: str):
+    if not ADMIN_IDS:
+        return
+
+    text = f"⚠️ AI ERROR\n\n{error_text[:3500]}"
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            pass
+
+
+async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None):
     try:
         await callback.message.edit_text(text, reply_markup=reply_markup)
     except Exception:
@@ -503,12 +541,12 @@ async def delete_context_command(message: Message):
 @dp.callback_query(F.data == "back_main")
 async def back_main_callback(callback: CallbackQuery):
     await callback.answer()
-    await safe_edit(callback, welcome_text(), reply_markup=main_menu())
+    await safe_edit_or_send(callback, welcome_text(), reply_markup=main_menu())
 
 
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery):
-    await callback.answer()
+    await callback.answer("Открываю профиль...")
 
     user = await get_or_create_user_by_data(
         telegram_id=callback.from_user.id,
@@ -516,14 +554,17 @@ async def profile_callback(callback: CallbackQuery):
         first_name=callback.from_user.first_name,
     )
 
-    await safe_edit(callback, await user_profile_text(user), reply_markup=main_menu())
+    await callback.message.answer(
+        await user_profile_text(user),
+        reply_markup=main_menu(),
+    )
 
 
 @dp.callback_query(F.data.in_({"premium", "plans"}))
 async def premium_callback(callback: CallbackQuery):
     await callback.answer()
 
-    await safe_edit(
+    await safe_edit_or_send(
         callback,
         "🚀 Выберите тариф для покупки:\n\n"
         "⭐ PLUS — 500 сообщений в неделю\n"
@@ -544,7 +585,7 @@ async def tariff_callback(callback: CallbackQuery):
 
     tariff = TARIFFS[plan]
 
-    await safe_edit(
+    await safe_edit_or_send(
         callback,
         f"🚀 {tariff['title']}\n\n"
         f"{tariff['description']}\n\n"
@@ -565,7 +606,7 @@ async def period_callback(callback: CallbackQuery):
 
     price = TARIFFS[plan]["prices"][months]
 
-    await safe_edit(
+    await safe_edit_or_send(
         callback,
         f"⭐ Подтвердите оплату Telegram Stars:\n\n"
         f"Тариф: {plan}\n"
@@ -659,7 +700,7 @@ async def successful_payment_handler(message: Message):
 @dp.callback_query(F.data == "models")
 async def models_callback(callback: CallbackQuery):
     await callback.answer()
-    await safe_edit(callback, "🤖 Выберите модель:", reply_markup=models_menu())
+    await safe_edit_or_send(callback, "🤖 Выберите модель:", reply_markup=models_menu())
 
 
 @dp.callback_query(F.data.startswith("set_model_"))
@@ -682,7 +723,7 @@ async def set_model_callback(callback: CallbackQuery):
         "deepseek": "⚫ DeepSeek",
     }
 
-    await safe_edit(
+    await safe_edit_or_send(
         callback,
         f"✅ Модель переключена:\n\n{names.get(model)}",
         reply_markup=main_menu(),
@@ -694,8 +735,7 @@ async def new_chat_callback(callback: CallbackQuery):
     await callback.answer()
     await clear_chat(callback.from_user.id)
 
-    await safe_edit(
-        callback,
+    await callback.message.answer(
         "💬 Новый чат начат.\n\nКонтекст очищен.",
         reply_markup=main_menu(),
     )
@@ -816,12 +856,20 @@ async def chat_handler(message: Message):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
-        print(f"AI ERROR: {e}")
+        error_text = traceback.format_exc()
+        print(f"AI ERROR:\n{error_text}")
+        await send_ai_error_to_admin(error_text)
 
-        await wait_message.edit_text(
-            "⚠️ Сейчас у AI временные технические работы.\n\n"
-            "Попробуйте ещё раз через минуту."
-        )
+        try:
+            await wait_message.edit_text(
+                "⚠️ Сейчас у AI временные технические работы.\n\n"
+                "Попробуйте ещё раз через минуту."
+            )
+        except Exception:
+            await message.answer(
+                "⚠️ Сейчас у AI временные технические работы.\n\n"
+                "Попробуйте ещё раз через минуту."
+            )
 
 
 async def main():
@@ -834,8 +882,10 @@ async def main():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is missing")
 
+    await bot.delete_webhook(drop_pending_updates=True)
+
     await init_db()
-    await setup_bot_commands()
+    await setup_bot_info()
 
     print("DATABASE CONNECTED")
     print("BOT STARTED")
