@@ -73,17 +73,17 @@ deepseek_client = AsyncOpenAI(
 ) if DEEPSEEK_API_KEY else None
 
 db_pool = None
+recent_starts = {}
 
 
 def main_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💬 Новый чат", callback_data="new_chat"),
                 InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
+                InlineKeyboardButton(text="🚀 Премиум", callback_data="premium"),
             ],
             [
-                InlineKeyboardButton(text="🚀 Премиум", callback_data="premium"),
                 InlineKeyboardButton(text="🤖 Модель", callback_data="models"),
             ],
         ]
@@ -230,6 +230,27 @@ async def init_db():
             );
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT,
+                event_type TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+
+
+async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO events (telegram_id, event_type, details)
+                VALUES ($1, $2, $3)
+            """, telegram_id, event_type, details[:1000])
+    except Exception as e:
+        print(f"LOG EVENT ERROR: {e}")
+
 
 async def setup_bot_info():
     await bot.set_my_commands([
@@ -241,8 +262,7 @@ async def setup_bot_info():
 
     try:
         await bot.set_my_description(
-            "AI-бот для работы с ChatGPT, Claude, Gemini и DeepSeek. "
-            "Пишите задачи, тексты, идеи и вопросы — бот поможет."
+            "AI-бот для работы с ChatGPT, Claude, Gemini и DeepSeek."
         )
         await bot.set_my_short_description(
             "ChatGPT, Claude, Gemini и DeepSeek в Telegram"
@@ -264,6 +284,8 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
                 (telegram_id, username, first_name, day_start, week_start)
                 VALUES ($1, $2, $3, $4, $5)
             """, telegram_id, username, first_name, today, week_start)
+            await log_event(telegram_id, "new_user", username or "")
+
         else:
             await conn.execute("""
                 UPDATE users
@@ -295,6 +317,7 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
                 SET plan='FREE', plan_until=NULL
                 WHERE telegram_id=$1
             """, telegram_id)
+            await log_event(telegram_id, "plan_expired", user["plan"])
 
         return await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
@@ -340,6 +363,7 @@ async def check_spam(telegram_id: int):
                 SET message_count=$2, blocked_until=$3
                 WHERE telegram_id=$1
             """, telegram_id, new_count, blocked_until)
+            await log_event(telegram_id, "spam_block", str(SPAM_BLOCK_SECONDS))
             return False, SPAM_BLOCK_SECONDS
 
         await conn.execute("""
@@ -402,10 +426,8 @@ async def get_chat_history(telegram_id, limit=10):
 
     history = []
     for row in reversed(rows):
-        role = row["role"]
-        if role not in {"user", "assistant", "system"}:
-            continue
-        history.append({"role": role, "content": row["content"]})
+        if row["role"] in {"user", "assistant", "system"}:
+            history.append({"role": row["role"], "content": row["content"]})
 
     return history
 
@@ -413,6 +435,7 @@ async def get_chat_history(telegram_id, limit=10):
 async def clear_chat(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE telegram_id=$1", telegram_id)
+    await log_event(telegram_id, "delete_context")
 
 
 async def activate_plan(telegram_id: int, plan: str, months: int):
@@ -424,6 +447,8 @@ async def activate_plan(telegram_id: int, plan: str, months: int):
             SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0
             WHERE telegram_id=$1
         """, telegram_id, plan, until)
+
+    await log_event(telegram_id, "activate_plan", f"{plan} {months} months")
 
 
 async def user_profile_text(user):
@@ -438,26 +463,36 @@ async def user_profile_text(user):
     current_model = model_names.get(user["selected_model"], "ChatGPT 5")
 
     if plan == "VIP":
-        limit_text = "♾ Безлимит"
+        usage_block = "Запросов: ♾ безлимит"
     elif plan in {"PLUS", "PRO"}:
-        limit_text = f"{user['weekly_used']} / {PLAN_WEEKLY_LIMITS[plan]} за неделю"
+        usage_block = f"Запросов в неделю: {user['weekly_used']}/{PLAN_WEEKLY_LIMITS[plan]}"
     else:
-        limit_text = (
-            f"{user['daily_used']} / {FREE_DAILY_LIMIT} сегодня\n"
-            f"{user['weekly_used']} / {FREE_WEEKLY_LIMIT} за неделю"
+        usage_block = (
+            f"Запросов сегодня: {user['daily_used']}/{FREE_DAILY_LIMIT}\n"
+            f"Запросов в неделю: {user['weekly_used']}/{FREE_WEEKLY_LIMIT}"
         )
 
-    until_text = "—"
-    if user["plan_until"]:
-        until_text = user["plan_until"].strftime("%d.%m.%Y")
-
-    return (
-        "👤 Мой профиль\n\n"
-        f"Тариф: {plan}\n"
-        f"Активен до: {until_text}\n"
-        f"Модель: {current_model}\n\n"
-        f"Использование:\n{limit_text}"
+    text = (
+        f"📊 Статистика использования\n\n"
+        f"{usage_block}\n\n"
+        f"Подписка: {plan}\n"
+        f"Выбрана модель: {current_model}\n\n"
     )
+
+    if plan != "FREE" and user["plan_until"]:
+        text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
+
+    text += (
+        "Нужно больше? Подключите /premium\n\n"
+        "🚀 PLUS:\n"
+        "└ 500 запросов в неделю\n\n"
+        "💎 PRO:\n"
+        "└ 1400 запросов в неделю\n\n"
+        "👑 VIP:\n"
+        "└ безлимит"
+    )
+
+    return text
 
 
 async def ai_router(selected_model: str, messages: list[dict]):
@@ -490,14 +525,9 @@ async def ai_router(selected_model: str, messages: list[dict]):
 
 
 async def send_ai_error_to_admin(error_text: str):
-    if not ADMIN_IDS:
-        return
-
-    text = f"⚠️ AI ERROR\n\n{error_text[:3500]}"
-
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, text)
+            await bot.send_message(admin_id, f"⚠️ AI ERROR\n\n{error_text[:3500]}")
         except Exception:
             pass
 
@@ -511,18 +541,29 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
+    now = time.time()
+    last = recent_starts.get(message.from_user.id, 0)
+
+    if now - last < 2:
+        return
+
+    recent_starts[message.from_user.id] = now
+
     await get_or_create_user(message)
+    await log_event(message.from_user.id, "start")
     await message.answer(welcome_text(), reply_markup=main_menu())
 
 
 @dp.message(Command("account"))
 async def account_command(message: Message):
     user = await get_or_create_user(message)
+    await log_event(message.from_user.id, "account")
     await message.answer(await user_profile_text(user), reply_markup=main_menu())
 
 
 @dp.message(Command("premium"))
 async def premium_command(message: Message):
+    await log_event(message.from_user.id, "premium_open")
     await message.answer(
         "🚀 Выберите тариф для покупки:\n\n"
         "⭐ PLUS — 500 сообщений в неделю\n"
@@ -554,15 +595,14 @@ async def profile_callback(callback: CallbackQuery):
         first_name=callback.from_user.first_name,
     )
 
-    await callback.message.answer(
-        await user_profile_text(user),
-        reply_markup=main_menu(),
-    )
+    await log_event(callback.from_user.id, "profile_click")
+    await callback.message.answer(await user_profile_text(user), reply_markup=main_menu())
 
 
 @dp.callback_query(F.data.in_({"premium", "plans"}))
 async def premium_callback(callback: CallbackQuery):
     await callback.answer()
+    await log_event(callback.from_user.id, "premium_click")
 
     await safe_edit_or_send(
         callback,
@@ -582,6 +622,8 @@ async def tariff_callback(callback: CallbackQuery):
 
     if plan not in TARIFFS:
         return
+
+    await log_event(callback.from_user.id, "tariff_select", plan)
 
     tariff = TARIFFS[plan]
 
@@ -606,6 +648,8 @@ async def period_callback(callback: CallbackQuery):
 
     price = TARIFFS[plan]["prices"][months]
 
+    await log_event(callback.from_user.id, "period_select", f"{plan} {months}")
+
     await safe_edit_or_send(
         callback,
         f"⭐ Подтвердите оплату Telegram Stars:\n\n"
@@ -628,6 +672,8 @@ async def pay_stars_callback(callback: CallbackQuery):
 
     price = TARIFFS[plan]["prices"][months]
     payload = f"plan:{plan}:months:{months}:user:{callback.from_user.id}:ts:{int(time.time())}"
+
+    await log_event(callback.from_user.id, "invoice_open", f"{plan} {months} {price}")
 
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
@@ -700,6 +746,7 @@ async def successful_payment_handler(message: Message):
 @dp.callback_query(F.data == "models")
 async def models_callback(callback: CallbackQuery):
     await callback.answer()
+    await log_event(callback.from_user.id, "models_open")
     await safe_edit_or_send(callback, "🤖 Выберите модель:", reply_markup=models_menu())
 
 
@@ -716,6 +763,8 @@ async def set_model_callback(callback: CallbackQuery):
             WHERE telegram_id=$2
         """, model, callback.from_user.id)
 
+    await log_event(callback.from_user.id, "model_select", model)
+
     names = {
         "gpt": "🧠 ChatGPT 5",
         "claude": "🟣 Claude",
@@ -730,42 +779,113 @@ async def set_model_callback(callback: CallbackQuery):
     )
 
 
-@dp.callback_query(F.data == "new_chat")
-async def new_chat_callback(callback: CallbackQuery):
-    await callback.answer()
-    await clear_chat(callback.from_user.id)
-
-    await callback.message.answer(
-        "💬 Новый чат начат.\n\nКонтекст очищен.",
-        reply_markup=main_menu(),
-    )
-
-
 @dp.message(Command("admin"))
 async def admin_handler(message: Message):
     if not is_admin(message.from_user.id):
         return
 
-    async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
-        pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
-        vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
-        total_payments = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
-
     await message.answer(
-        "🛠 Админка\n\n"
-        f"Пользователей: {total_users}\n"
-        f"PLUS: {plus_users}\n"
-        f"PRO: {pro_users}\n"
-        f"VIP: {vip_users}\n"
-        f"Stars получено: {total_payments}\n\n"
-        "Команды:\n"
+        "🛠 Админ-панель\n\n"
+        "/stats — общая статистика\n"
+        "/users — последние пользователи\n"
+        "/payments — платежи\n"
         "/setplus telegram_id\n"
         "/setpro telegram_id\n"
         "/setvip telegram_id\n"
         "/setfree telegram_id"
     )
+
+
+@dp.message(Command("stats"))
+async def stats_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        today_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at::date = CURRENT_DATE")
+        total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user'")
+        today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at::date = CURRENT_DATE")
+        plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
+        pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
+        vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
+        total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
+        starts_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at::date = CURRENT_DATE")
+        premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='premium_click'")
+        invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
+
+    await message.answer(
+        "📊 Статистика бота\n\n"
+        f"Пользователей всего: {total_users}\n"
+        f"Новых сегодня: {today_users}\n"
+        f"Стартов сегодня: {starts_today}\n\n"
+        f"Сообщений всего: {total_messages}\n"
+        f"Сообщений сегодня: {today_messages}\n\n"
+        f"PLUS: {plus_users}\n"
+        f"PRO: {pro_users}\n"
+        f"VIP: {vip_users}\n\n"
+        f"Открытий премиума: {premium_clicks}\n"
+        f"Открытий оплаты: {invoices}\n"
+        f"Stars получено: {total_stars}"
+    )
+
+
+@dp.message(Command("users"))
+async def users_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT telegram_id, username, first_name, plan, weekly_used, created_at
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT 15
+        """)
+
+    text = "👥 Последние пользователи\n\n"
+
+    for row in rows:
+        name = row["username"] or row["first_name"] or "без имени"
+        text += (
+            f"ID: {row['telegram_id']}\n"
+            f"Имя: {name}\n"
+            f"Тариф: {row['plan']}\n"
+            f"Запросов за неделю: {row['weekly_used']}\n"
+            f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
+        )
+
+    await message.answer(text[:3900])
+
+
+@dp.message(Command("payments"))
+async def payments_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT telegram_id, plan, months, amount, currency, created_at
+            FROM payments
+            ORDER BY created_at DESC
+            LIMIT 15
+        """)
+
+    if not rows:
+        await message.answer("Платежей пока нет.")
+        return
+
+    text = "💳 Последние платежи\n\n"
+
+    for row in rows:
+        text += (
+            f"ID: {row['telegram_id']}\n"
+            f"Тариф: {row['plan']} на {row['months']} мес.\n"
+            f"Сумма: {row['amount']} {row['currency']}\n"
+            f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
+        )
+
+    await message.answer(text[:3900])
 
 
 async def admin_set_plan(message: Message, plan: str):
@@ -788,6 +908,7 @@ async def admin_set_plan(message: Message, plan: str):
             WHERE telegram_id=$1
         """, telegram_id, plan, until)
 
+    await log_event(telegram_id, "admin_set_plan", plan)
     await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}.")
 
 
@@ -813,6 +934,9 @@ async def setfree_handler(message: Message):
 
 @dp.message(F.text)
 async def chat_handler(message: Message):
+    if message.text.startswith("/"):
+        return
+
     user = await get_or_create_user(message)
 
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
@@ -827,6 +951,8 @@ async def chat_handler(message: Message):
     allowed, reason = await check_limit(user)
 
     if not allowed:
+        await log_event(message.from_user.id, "limit_reached", reason)
+
         await message.answer(
             "⏳ Лимит сообщений закончился.\n\n"
             "Вы можете перейти на PLUS, PRO или VIP.",
@@ -847,6 +973,7 @@ async def chat_handler(message: Message):
 
         await save_message(message.from_user.id, "assistant", answer)
         await increase_usage(message.from_user.id)
+        await log_event(message.from_user.id, "ai_message", user["selected_model"])
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -855,7 +982,7 @@ async def chat_handler(message: Message):
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
-    except Exception as e:
+    except Exception:
         error_text = traceback.format_exc()
         print(f"AI ERROR:\n{error_text}")
         await send_ai_error_to_admin(error_text)
