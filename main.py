@@ -115,6 +115,16 @@ def tariffs_menu():
     )
 
 
+def channels_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📰 Топор Live 1.0", url="https://t.me/ToporLive1_0")],
+            [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNews")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
+        ]
+    )
+
+
 def period_menu(plan: str):
     prices = TARIFFS[plan]["prices"]
 
@@ -164,6 +174,23 @@ def welcome_text():
         "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
         "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>\n\n"
         "Напишите вопрос или выберите действие ниже."
+    )
+
+
+def premium_text():
+    return (
+        "💳 Купить подписку\n\n"
+        "⭐ PLUS — 500 запросов в неделю\n"
+        "💎 PRO — 1400 запросов в неделю\n"
+        "👑 VIP — безлимит"
+    )
+
+
+def channels_text():
+    return (
+        "🧠 Наши каналы:\n\n"
+        "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
+        "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>"
     )
 
 
@@ -255,16 +282,16 @@ async def setup_bot_info():
     await bot.set_my_commands([
         BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
-        BotCommand(command="premium", description="🚀 Премиум"),
+        BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
 
     try:
         await bot.set_my_description(
-            "AI-бот для работы с ChatGPT, Claude, Gemini и DeepSeek."
+            "AI-бот для работы с ChatGPT, Claude и Nano Banana."
         )
         await bot.set_my_short_description(
-            "ChatGPT, Claude, Gemini и DeepSeek в Telegram"
+            "ChatGPT, Claude и Nano Banana в Telegram"
         )
     except Exception as e:
         print(f"BOT DESCRIPTION ERROR: {e}")
@@ -452,13 +479,15 @@ async def activate_plan(telegram_id: int, plan: str, months: int):
 
 async def user_profile_text(user):
     model_names = {
-    "gpt": "ChatGPT",
-    "claude": "Claude",
-    "nanobanana": "Nano Banana",
-}
+        "gpt": "ChatGPT",
+        "claude": "Claude",
+        "nanobanana": "Nano Banana",
+        "gemini": "Gemini",
+        "deepseek": "DeepSeek",
+    }
 
     plan = user["plan"] or "FREE"
-    current_model = model_names.get(user["selected_model"], "ChatGPT 5")
+    current_model = model_names.get(user["selected_model"], "ChatGPT")
 
     if plan == "VIP":
         usage_block = "Запросов: ♾ безлимит"
@@ -480,12 +509,12 @@ async def user_profile_text(user):
     if plan != "FREE" and user["plan_until"]:
         text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
 
-  text += (
-    "Нужно больше? 🚀 Выберите тариф для покупки:\n\n"
-    "⭐ PLUS — 500 запросов в неделю\n"
-    "💎 PRO — 1400 запросов в неделю\n"
-    "👑 VIP — безлимит"
-)
+    text += (
+        "Нужно больше? 🚀 Выберите тариф для покупки:\n\n"
+        "⭐ PLUS — 500 запросов в неделю\n"
+        "💎 PRO — 1400 запросов в неделю\n"
+        "👑 VIP — безлимит"
+    )
 
     return text
 
@@ -510,6 +539,13 @@ async def ai_router(selected_model: str, messages: list[dict]):
         )
         return response.choices[0].message.content
 
+    if selected_model == "nanobanana":
+        return (
+            "🍌 Nano Banana пока готовится.\n\n"
+            "Скоро здесь будет генерация изображений. "
+            "Пока выберите ChatGPT или Claude для текстового ответа."
+        )
+
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=full_messages,
@@ -527,11 +563,11 @@ async def send_ai_error_to_admin(error_text: str):
             pass
 
 
-async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None):
+async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
     try:
-        await callback.message.edit_text(text, reply_markup=reply_markup)
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception:
-        await callback.message.answer(text, reply_markup=reply_markup)
+        await callback.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
 @dp.message(CommandStart())
@@ -560,10 +596,7 @@ async def account_command(message: Message):
 async def premium_command(message: Message):
     await log_event(message.from_user.id, "premium_open")
     await message.answer(
-"💳 Купить подписку\n\n"
-"⭐ PLUS — 500 запросов в неделю\n"
-"💎 PRO — 1400 запросов в неделю\n"
-"👑 VIP — безлимит",
+        premium_text(),
         reply_markup=tariffs_menu(),
     )
 
@@ -577,29 +610,11 @@ async def delete_context_command(message: Message):
 @dp.callback_query(F.data == "back_main")
 async def back_main_callback(callback: CallbackQuery):
     await callback.answer()
-    await safe_edit_or_send(callback, welcome_text(), reply_markup=main_menu())
+    await safe_edit_or_send(callback, welcome_text(), reply_markup=main_menu(), parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery):
-    @dp.callback_query(F.data == "channels")
-async def channels_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "channels_open")
-
-    await safe_edit_or_send(
-        callback,
-        "🧠 Наши каналы:\n\n"
-        "• Наш канал: <a href='https://t.me/ToporLive1_0'>Топор Live 1.0</a>\n"
-        "• Канал support: <a href='https://t.me/LightningNews'>Молния News</a>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📰 Топор Live 1.0", url="https://t.me/ToporLive1_0")],
-                [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNews")],
-                [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
-            ]
-        ),
-    )    
     await callback.answer("Открываю профиль...")
 
     user = await get_or_create_user_by_data(
@@ -612,6 +627,19 @@ async def channels_callback(callback: CallbackQuery):
     await callback.message.answer(await user_profile_text(user), reply_markup=main_menu())
 
 
+@dp.callback_query(F.data == "channels")
+async def channels_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "channels_open")
+
+    await safe_edit_or_send(
+        callback,
+        channels_text(),
+        reply_markup=channels_menu(),
+        parse_mode="HTML",
+    )
+
+
 @dp.callback_query(F.data.in_({"premium", "plans"}))
 async def premium_callback(callback: CallbackQuery):
     await callback.answer()
@@ -619,10 +647,7 @@ async def premium_callback(callback: CallbackQuery):
 
     await safe_edit_or_send(
         callback,
-"💳 Купить подписку\n\n"
-"⭐ PLUS — 500 запросов в неделю\n"
-"💎 PRO — 1400 запросов в неделю\n"
-"👑 VIP — безлимит",
+        premium_text(),
         reply_markup=tariffs_menu(),
     )
 
@@ -769,6 +794,16 @@ async def set_model_callback(callback: CallbackQuery):
 
     model = callback.data.replace("set_model_", "")
 
+    allowed_models = {"gpt", "claude", "nanobanana"}
+
+    if model not in allowed_models:
+        await safe_edit_or_send(
+            callback,
+            "⚠️ Эта модель сейчас недоступна.",
+            reply_markup=models_menu(),
+        )
+        return
+
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE users
@@ -778,11 +813,11 @@ async def set_model_callback(callback: CallbackQuery):
 
     await log_event(callback.from_user.id, "model_select", model)
 
- names = {
-    "gpt": "🧠 ChatGPT",
-    "claude": "🟣 Claude",
-    "nanobanana": "🍌 Nano Banana",
-}
+    names = {
+        "gpt": "🧠 ChatGPT",
+        "claude": "🟣 Claude",
+        "nanobanana": "🍌 Nano Banana",
+    }
 
     await safe_edit_or_send(
         callback,
