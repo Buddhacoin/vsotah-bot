@@ -38,6 +38,24 @@ menu = InlineKeyboardMarkup(
 )
 
 
+models_menu = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🧠 ChatGPT 5", callback_data="set_model_gpt")
+        ],
+        [
+            InlineKeyboardButton(text="🟣 Claude", callback_data="set_model_claude")
+        ],
+        [
+            InlineKeyboardButton(text="🔵 Gemini", callback_data="set_model_gemini")
+        ],
+        [
+            InlineKeyboardButton(text="⚫ DeepSeek", callback_data="set_model_deepseek")
+        ]
+    ]
+)
+
+
 def get_week_start():
     today = date.today()
     return today - timedelta(days=today.weekday())
@@ -48,12 +66,14 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL)
 
     async with db_pool.acquire() as conn:
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 plan TEXT DEFAULT 'FREE',
+                selected_model TEXT DEFAULT 'gpt',
                 daily_used INTEGER DEFAULT 0,
                 weekly_used INTEGER DEFAULT 0,
                 day_start DATE DEFAULT CURRENT_DATE,
@@ -180,6 +200,15 @@ async def get_chat_history(telegram_id, limit=12):
 async def user_profile_text(user):
     plan = user["plan"]
 
+    model_names = {
+        "gpt": "ChatGPT 5",
+        "claude": "Claude",
+        "gemini": "Gemini",
+        "deepseek": "DeepSeek"
+    }
+
+    current_model = model_names.get(user["selected_model"], "ChatGPT 5")
+
     if plan == "VIP":
         limit_text = "♾ Безлимит"
     elif plan == "PRO":
@@ -193,6 +222,7 @@ async def user_profile_text(user):
     return (
         "👤 Ваш профиль\n\n"
         f"Тариф: {plan}\n"
+        f"Модель: {current_model}\n\n"
         f"Использование:\n{limit_text}"
     )
 
@@ -208,12 +238,6 @@ async def start_handler(message: Message):
     )
 
 
-@dp.message(Command("profile"))
-async def profile_handler(message: Message):
-    user = await get_or_create_user(message)
-    await message.answer(await user_profile_text(user), reply_markup=menu)
-
-
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery):
     user = await get_or_create_user_by_data(
@@ -226,6 +250,7 @@ async def profile_callback(callback: CallbackQuery):
         await user_profile_text(user),
         reply_markup=menu
     )
+
     await callback.answer()
 
 
@@ -236,23 +261,46 @@ async def plans_callback(callback: CallbackQuery):
         "FREE — 105 сообщений в неделю\n"
         "PRO — 1000 сообщений в день\n"
         "VIP — безлимит\n\n"
-        "Оплата Telegram Stars будет добавлена следующим шагом.",
+        "Оплата Telegram Stars скоро появится.",
         reply_markup=menu
     )
+
     await callback.answer()
 
 
 @dp.callback_query(F.data == "models")
 async def models_callback(callback: CallbackQuery):
     await callback.message.answer(
-        "🤖 Сейчас активна модель: GPT 5\n\n"
-        "Скоро добавим выбор:\n"
-        "• GPT\n"
-        "• Claude\n"
-        "• Gemini\n"
-        "• DeepSeek",
+        "🤖 Выберите модель:",
+        reply_markup=models_menu
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("set_model_"))
+async def set_model_callback(callback: CallbackQuery):
+    model = callback.data.replace("set_model_", "")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users
+            SET selected_model=$1
+            WHERE telegram_id=$2
+        """, model, callback.from_user.id)
+
+    names = {
+        "gpt": "🧠 ChatGPT 5",
+        "claude": "🟣 Claude",
+        "gemini": "🔵 Gemini",
+        "deepseek": "⚫ DeepSeek"
+    }
+
+    await callback.message.answer(
+        f"✅ Модель переключена:\n\n{names.get(model)}",
         reply_markup=menu
     )
+
     await callback.answer()
 
 
@@ -269,6 +317,7 @@ async def new_chat_callback(callback: CallbackQuery):
         "Контекст очищен.",
         reply_markup=menu
     )
+
     await callback.answer()
 
 
@@ -282,19 +331,16 @@ async def chat_handler(message: Message):
         if reason == "FREE_DAY_LIMIT":
             text = (
                 "⏳ Дневной лимит FREE на сегодня закончился.\n\n"
-                "Завтра сообщения обновятся автоматически.\n"
-                "Для большего лимита можно перейти на PRO."
+                "Завтра сообщения обновятся автоматически."
             )
         elif reason == "FREE_WEEK_LIMIT":
             text = (
                 "⏳ Недельный лимит FREE закончился.\n\n"
-                "Лимит обновится на следующей неделе.\n"
-                "Для продолжения можно перейти на PRO."
+                "Лимит обновится на следующей неделе."
             )
         else:
             text = (
-                "⏳ Дневной лимит PRO на сегодня закончился.\n\n"
-                "Завтра сообщения обновятся автоматически."
+                "⏳ Дневной лимит PRO на сегодня закончился."
             )
 
         await message.answer(text, reply_markup=menu)
@@ -305,14 +351,14 @@ async def chat_handler(message: Message):
     try:
         await save_message(message.from_user.id, "user", message.text)
 
-        history = await get_chat_history(message.from_user.id, limit=12)
+        history = await get_chat_history(message.from_user.id)
 
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": "Ты полезный AI-ассистент. Отвечай понятно, профессионально и на языке пользователя. Помни контекст текущего диалога."
+                    "content": "Ты полезный AI-ассистент. Отвечай профессионально и понятно."
                 },
                 *history
             ]
@@ -321,23 +367,28 @@ async def chat_handler(message: Message):
         answer = response.choices[0].message.content
 
         await save_message(message.from_user.id, "assistant", answer)
+
         await increase_usage(message.from_user.id)
+
         await wait_message.edit_text(answer)
 
     except Exception as e:
         print(f"AI ERROR: {e}")
 
         await wait_message.edit_text(
-            "⚠️ Сейчас у GPT временные технические работы.\n\n"
-            "Попробуйте ещё раз через минуту или выберите другую модель."
+            "⚠️ Сейчас у AI временные технические работы.\n\n"
+            "Попробуйте ещё раз через минуту."
         )
 
 
 async def main():
     print("BOT STARTING")
+
     await init_db()
+
     print("DATABASE CONNECTED")
     print("BOT STARTED")
+
     await dp.start_polling(bot)
 
 
