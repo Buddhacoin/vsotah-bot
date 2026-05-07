@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import asyncpg
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from openai import AsyncOpenAI
 
 
@@ -24,12 +24,17 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 db_pool = None
 
 
-menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="💬 Новый чат"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="💎 Тарифы"), KeyboardButton(text="🤖 Модель")]
-    ],
-    resize_keyboard=True
+menu = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💬 Новый чат", callback_data="new_chat"),
+            InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
+        ],
+        [
+            InlineKeyboardButton(text="💎 Тарифы", callback_data="plans"),
+            InlineKeyboardButton(text="🤖 Модель", callback_data="models")
+        ]
+    ]
 )
 
 
@@ -68,11 +73,7 @@ async def init_db():
         """)
 
 
-async def get_or_create_user(message: Message):
-    telegram_id = message.from_user.id
-    username = message.from_user.username
-    first_name = message.from_user.first_name
-
+async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
     today = date.today()
     week_start = get_week_start()
 
@@ -89,10 +90,10 @@ async def get_or_create_user(message: Message):
                 VALUES ($1, $2, $3, $4, $5)
             """, telegram_id, username, first_name, today, week_start)
 
-            user = await conn.fetchrow(
-                "SELECT * FROM users WHERE telegram_id=$1",
-                telegram_id
-            )
+        user = await conn.fetchrow(
+            "SELECT * FROM users WHERE telegram_id=$1",
+            telegram_id
+        )
 
         if user["day_start"] != today:
             await conn.execute("""
@@ -108,12 +109,18 @@ async def get_or_create_user(message: Message):
                 WHERE telegram_id=$1
             """, telegram_id, week_start)
 
-        user = await conn.fetchrow(
+        return await conn.fetchrow(
             "SELECT * FROM users WHERE telegram_id=$1",
             telegram_id
         )
 
-        return user
+
+async def get_or_create_user(message: Message):
+    return await get_or_create_user_by_data(
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name
+    )
 
 
 async def check_limit(user):
@@ -164,15 +171,10 @@ async def get_chat_history(telegram_id, limit=12):
             LIMIT $2
         """, telegram_id, limit)
 
-    history = []
-
-    for row in reversed(rows):
-        history.append({
-            "role": row["role"],
-            "content": row["content"]
-        })
-
-    return history
+    return [
+        {"role": row["role"], "content": row["content"]}
+        for row in reversed(rows)
+    ]
 
 
 async def user_profile_text(user):
@@ -207,15 +209,29 @@ async def start_handler(message: Message):
 
 
 @dp.message(Command("profile"))
-@dp.message(F.text == "👤 Профиль")
 async def profile_handler(message: Message):
     user = await get_or_create_user(message)
     await message.answer(await user_profile_text(user), reply_markup=menu)
 
 
-@dp.message(F.text == "💎 Тарифы")
-async def plans_handler(message: Message):
-    await message.answer(
+@dp.callback_query(F.data == "profile")
+async def profile_callback(callback: CallbackQuery):
+    user = await get_or_create_user_by_data(
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+        first_name=callback.from_user.first_name
+    )
+
+    await callback.message.answer(
+        await user_profile_text(user),
+        reply_markup=menu
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "plans")
+async def plans_callback(callback: CallbackQuery):
+    await callback.message.answer(
         "💎 Тарифы\n\n"
         "FREE — 105 сообщений в неделю\n"
         "PRO — 1000 сообщений в день\n"
@@ -223,11 +239,12 @@ async def plans_handler(message: Message):
         "Оплата Telegram Stars будет добавлена следующим шагом.",
         reply_markup=menu
     )
+    await callback.answer()
 
 
-@dp.message(F.text == "🤖 Модель")
-async def model_handler(message: Message):
-    await message.answer(
+@dp.callback_query(F.data == "models")
+async def models_callback(callback: CallbackQuery):
+    await callback.message.answer(
         "🤖 Сейчас активна модель: GPT 5\n\n"
         "Скоро добавим выбор:\n"
         "• GPT\n"
@@ -236,21 +253,23 @@ async def model_handler(message: Message):
         "• DeepSeek",
         reply_markup=menu
     )
+    await callback.answer()
 
 
-@dp.message(F.text == "💬 Новый чат")
-async def new_chat_handler(message: Message):
+@dp.callback_query(F.data == "new_chat")
+async def new_chat_callback(callback: CallbackQuery):
     async with db_pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM messages WHERE telegram_id=$1",
-            message.from_user.id
+            callback.from_user.id
         )
 
-    await message.answer(
+    await callback.message.answer(
         "💬 Новый чат начат.\n\n"
-        "Контекст очищен. Напишите новый вопрос.",
+        "Контекст очищен.",
         reply_markup=menu
     )
+    await callback.answer()
 
 
 @dp.message(F.text)
@@ -316,12 +335,9 @@ async def chat_handler(message: Message):
 
 async def main():
     print("BOT STARTING")
-
     await init_db()
-
     print("DATABASE CONNECTED")
     print("BOT STARTED")
-
     await dp.start_polling(bot)
 
 
