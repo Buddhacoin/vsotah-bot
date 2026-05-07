@@ -57,6 +57,16 @@ async def init_db():
             );
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+
 
 async def get_or_create_user(message: Message):
     telegram_id = message.from_user.id
@@ -136,6 +146,35 @@ async def increase_usage(telegram_id):
         """, telegram_id)
 
 
+async def save_message(telegram_id, role, content):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO messages (telegram_id, role, content)
+            VALUES ($1, $2, $3)
+        """, telegram_id, role, content)
+
+
+async def get_chat_history(telegram_id, limit=12):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT role, content
+            FROM messages
+            WHERE telegram_id=$1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, telegram_id, limit)
+
+    history = []
+
+    for row in reversed(rows):
+        history.append({
+            "role": row["role"],
+            "content": row["content"]
+        })
+
+    return history
+
+
 async def user_profile_text(user):
     plan = user["plan"]
 
@@ -201,9 +240,15 @@ async def model_handler(message: Message):
 
 @dp.message(F.text == "💬 Новый чат")
 async def new_chat_handler(message: Message):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM messages WHERE telegram_id=$1",
+            message.from_user.id
+        )
+
     await message.answer(
         "💬 Новый чат начат.\n\n"
-        "Напишите новый вопрос.",
+        "Контекст очищен. Напишите новый вопрос.",
         reply_markup=menu
     )
 
@@ -239,22 +284,24 @@ async def chat_handler(message: Message):
     wait_message = await message.answer("💭 Думаю...")
 
     try:
+        await save_message(message.from_user.id, "user", message.text)
+
+        history = await get_chat_history(message.from_user.id, limit=12)
+
         response = await client.chat.completions.create(
-            model="gpt 5",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": "Ты полезный AI-ассистент. Отвечай понятно, профессионально и на языке пользователя."
+                    "content": "Ты полезный AI-ассистент. Отвечай понятно, профессионально и на языке пользователя. Помни контекст текущего диалога."
                 },
-                {
-                    "role": "user",
-                    "content": message.text
-                }
+                *history
             ]
         )
 
         answer = response.choices[0].message.content
 
+        await save_message(message.from_user.id, "assistant", answer)
         await increase_usage(message.from_user.id)
         await wait_message.edit_text(answer)
 
