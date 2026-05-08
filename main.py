@@ -1070,7 +1070,6 @@ async def chat_handler(message: Message):
             await message.answer_photo(
                 photo=photo,
                 caption=(text_note[:900] if text_note else "✅ Готово"),
-                reply_markup=main_menu(),
             )
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
@@ -1112,9 +1111,9 @@ async def chat_handler(message: Message):
         await log_event(message.from_user.id, "ai_message", selected_model)
 
         if len(answer) <= 3900:
-            await wait_message.edit_text(answer, reply_markup=main_menu())
+            await wait_message.edit_text(answer)
         else:
-            await wait_message.edit_text(answer[:3900], reply_markup=main_menu())
+            await wait_message.edit_text(answer[:3900])
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
