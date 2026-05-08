@@ -22,6 +22,7 @@ from aiogram.types import (
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 from google import genai
+from google.genai import types
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -34,7 +35,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
 ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "gemini-2.0-flash-preview-image-generation")
+NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 
 ADMIN_IDS = {
     int(x.strip())
@@ -587,21 +588,27 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
         return None, "⚠️ Nano Banana пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
 
     def run_image_generation():
-        response = google_client.models.generate_content(
+        response = google_client.models.generate_images(
             model=NANO_BANANA_MODEL,
-            contents=prompt,
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="1:1",
+                person_generation="allow_adult",
+            ),
         )
 
-        text_parts = []
-        image_bytes = None
+        if not response.generated_images:
+            return None, "⚠️ Nano Banana не вернул изображение. Попробуйте другой запрос."
 
-        for part in response.candidates[0].content.parts:
-            if getattr(part, "text", None):
-                text_parts.append(part.text)
-            elif getattr(part, "inline_data", None):
-                image_bytes = part.inline_data.data
+        image_obj = response.generated_images[0].image
 
-        return image_bytes, "\n".join(text_parts).strip()
+        if hasattr(image_obj, "image_bytes") and image_obj.image_bytes:
+            return image_obj.image_bytes, "🍌 Готово"
+
+        buffer = BytesIO()
+        image_obj.save(buffer, format="PNG")
+        return buffer.getvalue(), "🍌 Готово"
 
     return await asyncio.to_thread(run_image_generation)
 
@@ -1022,9 +1029,12 @@ async def chat_handler(message: Message):
             print(f"NANO BANANA ERROR SHORT:\n{admin_error}")
             print(f"NANO BANANA ERROR TRACE:\n{traceback.format_exc()}")
             await send_ai_error_to_admin(
-                "⚠️ AI ERROR\n\n"
-                f"Model: nanobanana\n"
-                f"Error: {admin_error}"
+                "⚠️ AI ERROR
+
+"
+                "Model: nanobanana
+"
+                "Nano Banana image generation failed. Check Railway logs."
             )
             try:
                 await wait_message.edit_text("⚠️ Nano Banana временно недоступен.\n\nПопробуйте позже или выберите другую нейросеть.")
@@ -1098,3 +1108,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
