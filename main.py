@@ -1034,7 +1034,7 @@ async def chat_handler(message: Message):
 "
                 "Model: nanobanana
 "
-                "Nano Banana image generation failed. Check Railway logs."
+                f"Error: {admin_error}"
             )
             try:
                 await wait_message.edit_text("⚠️ Nano Banana временно недоступен.\n\nПопробуйте позже или выберите другую нейросеть.")
