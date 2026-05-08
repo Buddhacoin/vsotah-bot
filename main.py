@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import time
 import traceback
@@ -36,6 +37,7 @@ OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
 ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
+GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
 
 ADMIN_IDS = {
     int(x.strip())
@@ -121,6 +123,7 @@ def models_menu():
             [InlineKeyboardButton(text="✴️ Claude", callback_data="set_model_claude")],
             [InlineKeyboardButton(text="✦ Gemini", callback_data="set_model_gemini")],
             [InlineKeyboardButton(text="🍌 Nano Banana", callback_data="set_model_nanobanana")],
+            [InlineKeyboardButton(text="🎨 GPT Image", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -189,9 +192,16 @@ def welcome_text():
         "📝 Генерация текста:\n"
         "• ChatGPT\n"
         "• Claude\n"
-        "• Gemini\n\n"
-        "🌇 Генерация изображений:\n"
-        "• Nano Banana Pro\n\n"
+        "• Gemini
+
+"
+        "🌇 Генерация изображений:
+"
+        "• Nano Banana Pro
+"
+        "• GPT Image
+
+"
         "🧠 Наши каналы:\n"
         "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>\n"
         "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>\n\n"
@@ -462,6 +472,7 @@ async def user_profile_text(user):
         "claude": "Claude",
         "gemini": "Gemini",
         "nanobanana": "Nano Banana",
+        "gptimage": "GPT Image",
         "deepseek": "DeepSeek",
     }
 
@@ -524,10 +535,13 @@ def messages_to_plain_text(messages: list[dict]) -> str:
 
 
 async def ai_router(selected_model: str, messages: list[dict]):
+    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
+    today_text = datetime.now().strftime("%A, %d.%m.%Y")
     system_text = (
         "Ты профессиональный AI-ассистент. "
         "Отвечай понятно, структурно и по делу. "
-        "Если пользователь пишет на русском — отвечай на русском."
+        "Если пользователь пишет на русском — отвечай на русском. "
+        f"Текущая дата и время: {current_datetime}. Сегодня: {today_text}."
     )
 
     if selected_model == "claude":
@@ -611,6 +625,27 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
         return buffer.getvalue(), "🍌 Готово"
 
     return await asyncio.to_thread(run_image_generation)
+
+
+async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
+    def normalize_b64(value: str) -> bytes:
+        if value.startswith("data:image"):
+            value = value.split(",", 1)[1]
+        return base64.b64decode(value)
+
+    response = await client.images.generate(
+        model=GPT_IMAGE_MODEL,
+        prompt=prompt,
+        size="1024x1024",
+        quality="medium",
+        n=1,
+    )
+
+    item = response.data[0]
+    if getattr(item, "b64_json", None):
+        return normalize_b64(item.b64_json), "🎨 Готово"
+
+    return None, "⚠️ GPT Image не вернул изображение. Попробуйте другой запрос."
 
 
 def short_error_text(error: Exception) -> str:
@@ -824,7 +859,7 @@ async def successful_payment_handler(message: Message):
 async def set_model_callback(callback: CallbackQuery):
     await callback.answer()
     model = callback.data.replace("set_model_", "")
-    allowed_models = {"gpt", "claude", "gemini", "nanobanana"}
+    allowed_models = {"gpt", "claude", "gemini", "nanobanana", "gptimage"}
 
     if model not in allowed_models:
         await safe_edit_or_send(callback, "⚠️ Эта модель сейчас недоступна.", reply_markup=models_menu())
@@ -839,8 +874,19 @@ async def set_model_callback(callback: CallbackQuery):
         "claude": "✴️ Claude",
         "gemini": "✦ Gemini",
         "nanobanana": "🍌 Nano Banana",
+        "gptimage": "🎨 GPT Image",
     }
-    await safe_edit_or_send(callback, f"✅ Нейросеть выбрана:\n\n{names.get(model)}", reply_markup=main_menu())
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        f"✅ Нейросеть выбрана:
+
+{names.get(model)}",
+        reply_markup=main_menu(),
+    )
 
 
 @dp.message(Command("admin"))
@@ -1002,37 +1048,48 @@ async def chat_handler(message: Message):
 
     selected_model = user["selected_model"]
 
-    if selected_model == "nanobanana":
-        wait_message = await message.answer("🍌 Генерирую изображение...")
+    if selected_model in {"nanobanana", "gptimage"}:
+        wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🎨 Генерирую изображение..."
+        wait_message = await message.answer(wait_text)
         try:
             await save_message(message.from_user.id, "user", message.text)
-            image_bytes, text_note = await generate_nano_banana_image(message.text)
+            if selected_model == "nanobanana":
+                image_bytes, text_note = await generate_nano_banana_image(message.text)
+            else:
+                image_bytes, text_note = await generate_gpt_image(message.text)
 
             if not image_bytes:
                 await wait_message.edit_text(text_note or "⚠️ Nano Banana не вернул изображение. Попробуйте другой запрос.")
                 return
 
-            photo = BufferedInputFile(image_bytes, filename="nano_banana.png")
+            filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
+            photo = BufferedInputFile(image_bytes, filename=filename)
             await wait_message.delete()
             await message.answer_photo(
                 photo=photo,
                 caption=(text_note[:900] if text_note else "🍌 Готово"),
             )
 
-            await save_message(message.from_user.id, "assistant", "[Nano Banana image generated]")
+            await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
             await increase_usage(message.from_user.id)
-            await log_event(message.from_user.id, "ai_image", "nanobanana")
+            await log_event(message.from_user.id, "ai_image", selected_model)
             return
 
         except Exception as e:
             admin_error = short_error_text(e)
-            print(f"NANO BANANA ERROR SHORT:\n{admin_error}")
-            print(f"NANO BANANA ERROR TRACE:\n{traceback.format_exc()}")
-            await send_ai_error_to_admin(f"⚠️ AI ERROR | nanobanana | {admin_error}")
+            print(f"IMAGE ERROR SHORT:
+{admin_error}")
+            print(f"IMAGE ERROR TRACE:
+{traceback.format_exc()}")
+            await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
             try:
-                await wait_message.edit_text("⚠️ Nano Banana временно недоступен.\n\nПопробуйте позже или выберите другую нейросеть.")
+                await wait_message.edit_text("⚠️ Генерация изображений временно недоступна.
+
+Попробуйте позже или выберите другую нейросеть.")
             except Exception:
-                await message.answer("⚠️ Nano Banana временно недоступен.\n\nПопробуйте позже или выберите другую нейросеть.")
+                await message.answer("⚠️ Генерация изображений временно недоступна.
+
+Попробуйте позже или выберите другую нейросеть.")
             return
 
     wait_message = await message.answer("Печатает ответ...")
@@ -1101,4 +1158,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
