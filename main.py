@@ -28,7 +28,7 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6-20260217")
 
 ADMIN_IDS = {
     int(x.strip())
@@ -619,10 +619,32 @@ async def ai_router(selected_model: str, messages: list[dict]):
     return response.choices[0].message.content
 
 
+def short_error_text(error: Exception) -> str:
+    text = str(error)
+
+    important_phrases = [
+        "Your credit balance is too low",
+        "credit balance is too low",
+        "insufficient_quota",
+        "Incorrect API key",
+        "invalid_api_key",
+        "model_not_found",
+        "not_found_error",
+        "rate_limit_error",
+        "overloaded_error",
+    ]
+
+    for phrase in important_phrases:
+        if phrase.lower() in text.lower():
+            return text[:1200]
+
+    return text[:1200]
+
+
 async def send_ai_error_to_admin(error_text: str):
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, f"⚠️ AI ERROR\n\n{error_text[:3500]}")
+            await bot.send_message(admin_id, error_text[:3500])
         except Exception:
             pass
 
@@ -1126,20 +1148,29 @@ async def chat_handler(message: Message):
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
-    except Exception:
-        error_text = traceback.format_exc()
-        print(f"AI ERROR:\n{error_text}")
-        await send_ai_error_to_admin(error_text)
+    except Exception as e:
+        admin_error = short_error_text(e)
+        full_trace = traceback.format_exc()
+
+        print(f"AI ERROR SHORT:\n{admin_error}")
+        print(f"AI ERROR TRACE:\n{full_trace}")
+
+        await send_ai_error_to_admin(
+            "⚠️ AI ERROR\n\n"
+            f"User ID: {message.from_user.id}\n"
+            f"Model: {user['selected_model']}\n"
+            f"Error: {admin_error}"
+        )
 
         try:
             await wait_message.edit_text(
-                "⚠️ Сейчас у AI временные технические работы.\n\n"
-                "Попробуйте ещё раз через минуту."
+                "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
+                "Попробуйте позже или выберите другую нейросеть."
             )
         except Exception:
             await message.answer(
-                "⚠️ Сейчас у AI временные технические работы.\n\n"
-                "Попробуйте ещё раз через минуту."
+                "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
+                "Попробуйте позже или выберите другую нейросеть."
             )
 
 
