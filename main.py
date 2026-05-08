@@ -1028,14 +1028,7 @@ async def chat_handler(message: Message):
             admin_error = short_error_text(e)
             print(f"NANO BANANA ERROR SHORT:\n{admin_error}")
             print(f"NANO BANANA ERROR TRACE:\n{traceback.format_exc()}")
-            await send_ai_error_to_admin(
-                "⚠️ AI ERROR
-
-"
-                "Model: nanobanana
-"
-                f"Error: {admin_error}"
-            )
+            await send_ai_error_to_admin(f"⚠️ AI ERROR | nanobanana | {admin_error}")
             try:
                 await wait_message.edit_text("⚠️ Nano Banana временно недоступен.\n\nПопробуйте позже или выберите другую нейросеть.")
             except Exception:
