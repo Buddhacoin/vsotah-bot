@@ -82,13 +82,8 @@ dp = Dispatcher()
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-anthropic_client = AsyncAnthropic(
-    api_key=ANTHROPIC_API_KEY,
-) if ANTHROPIC_API_KEY else None
-
-google_client = genai.Client(
-    api_key=GOOGLE_API_KEY,
-) if GOOGLE_API_KEY else None
+anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+google_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
 
 deepseek_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -123,7 +118,7 @@ def models_menu():
             [InlineKeyboardButton(text="✴️ Claude", callback_data="set_model_claude")],
             [InlineKeyboardButton(text="✦ Gemini", callback_data="set_model_gemini")],
             [InlineKeyboardButton(text="🍌 Nano Banana", callback_data="set_model_nanobanana")],
-            [InlineKeyboardButton(text="🎨 GPT Image", callback_data="set_model_gptimage")],
+            [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -185,6 +180,17 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+def model_display_name(model: str) -> str:
+    names = {
+        "gpt": "🌀 ChatGPT",
+        "claude": "✴️ Claude",
+        "gemini": "✦ Gemini",
+        "nanobanana": "🍌 Nano Banana",
+        "gptimage": "🌀 Sora GPT Image",
+    }
+    return names.get(model, "🌀 ChatGPT")
+
+
 def welcome_text():
     return (
         "👋 Добро пожаловать в @GPTclaudeAIbot\n\n"
@@ -192,16 +198,10 @@ def welcome_text():
         "📝 Генерация текста:\n"
         "• ChatGPT\n"
         "• Claude\n"
-        "• Gemini
-
-"
-        "🌇 Генерация изображений:
-"
-        "• Nano Banana Pro
-"
-        "• GPT Image
-
-"
+        "• Gemini\n\n"
+        "🌇 Генерация изображений:\n"
+        "• Nano Banana Pro\n"
+        "• Sora GPT Image\n\n"
         "🧠 Наши каналы:\n"
         "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>\n"
         "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>\n\n"
@@ -320,8 +320,8 @@ async def setup_bot_info():
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
     try:
-        await bot.set_my_description("AI-бот для работы с ChatGPT, Claude, Gemini и Nano Banana.")
-        await bot.set_my_short_description("ChatGPT, Claude, Gemini и Nano Banana в Telegram")
+        await bot.set_my_description("AI-бот для работы с ChatGPT, Claude, Gemini, Nano Banana и Sora GPT Image.")
+        await bot.set_my_short_description("ChatGPT, Claude, Gemini и генерация изображений")
     except Exception as e:
         print(f"BOT DESCRIPTION ERROR: {e}")
 
@@ -340,9 +340,7 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
             """, telegram_id, username, first_name, today, week_start)
             await log_event(telegram_id, "new_user", username or "")
         else:
-            await conn.execute("""
-                UPDATE users SET username=$2, first_name=$3 WHERE telegram_id=$1
-            """, telegram_id, username, first_name)
+            await conn.execute("UPDATE users SET username=$2, first_name=$3 WHERE telegram_id=$1", telegram_id, username, first_name)
 
         user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
@@ -386,18 +384,14 @@ async def check_spam(telegram_id: int):
             return False, state["blocked_until"] - now
 
         if now - state["window_start"] > SPAM_WINDOW_SECONDS:
-            await conn.execute("""
-                UPDATE spam_state SET window_start=$2, message_count=1, blocked_until=0 WHERE telegram_id=$1
-            """, telegram_id, now)
+            await conn.execute("UPDATE spam_state SET window_start=$2, message_count=1, blocked_until=0 WHERE telegram_id=$1", telegram_id, now)
             return True, None
 
         new_count = state["message_count"] + 1
 
         if new_count > SPAM_MAX_MESSAGES:
             blocked_until = now + SPAM_BLOCK_SECONDS
-            await conn.execute("""
-                UPDATE spam_state SET message_count=$2, blocked_until=$3 WHERE telegram_id=$1
-            """, telegram_id, new_count, blocked_until)
+            await conn.execute("UPDATE spam_state SET message_count=$2, blocked_until=$3 WHERE telegram_id=$1", telegram_id, new_count, blocked_until)
             await log_event(telegram_id, "spam_block", str(SPAM_BLOCK_SECONDS))
             return False, SPAM_BLOCK_SECONDS
 
@@ -429,7 +423,10 @@ async def check_limit(user):
 async def increase_usage(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            UPDATE users SET daily_used = daily_used + 1, weekly_used = weekly_used + 1 WHERE telegram_id=$1
+            UPDATE users
+            SET daily_used = daily_used + 1,
+                weekly_used = weekly_used + 1
+            WHERE telegram_id=$1
         """, telegram_id)
 
 
@@ -441,7 +438,11 @@ async def save_message(telegram_id, role, content):
 async def get_chat_history(telegram_id, limit=10):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT role, content FROM messages WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT $2
+            SELECT role, content
+            FROM messages
+            WHERE telegram_id=$1
+            ORDER BY created_at DESC
+            LIMIT $2
         """, telegram_id, limit)
 
     history = []
@@ -461,7 +462,9 @@ async def activate_plan(telegram_id: int, plan: str, months: int):
     until = add_months_rough(months)
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            UPDATE users SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0 WHERE telegram_id=$1
+            UPDATE users
+            SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0
+            WHERE telegram_id=$1
         """, telegram_id, plan, until)
     await log_event(telegram_id, "activate_plan", f"{plan} {months} months")
 
@@ -472,7 +475,7 @@ async def user_profile_text(user):
         "claude": "Claude",
         "gemini": "Gemini",
         "nanobanana": "Nano Banana",
-        "gptimage": "GPT Image",
+        "gptimage": "Sora GPT Image",
         "deepseek": "DeepSeek",
     }
 
@@ -585,9 +588,6 @@ async def ai_router(selected_model: str, messages: list[dict]):
         )
         return response.choices[0].message.content
 
-    if selected_model == "nanobanana":
-        return "🍌 Напишите, какую картинку создать, и Nano Banana сгенерирует изображение."
-
     full_messages = [{"role": "system", "content": system_text}, *messages]
     response = await client.chat.completions.create(
         model=OPENAI_TEXT_MODEL,
@@ -643,13 +643,13 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
 
     item = response.data[0]
     if getattr(item, "b64_json", None):
-        return normalize_b64(item.b64_json), "🎨 Готово"
+        return normalize_b64(item.b64_json), "🌀 Готово"
 
-    return None, "⚠️ GPT Image не вернул изображение. Попробуйте другой запрос."
+    return None, "⚠️ Sora GPT Image не вернул изображение. Попробуйте другой запрос."
 
 
 def short_error_text(error: Exception) -> str:
-    return str(error)[:1200]
+    return str(error).replace("\n", " ")[:1200]
 
 
 async def send_ai_error_to_admin(error_text: str):
@@ -685,9 +685,14 @@ async def start_handler(message: Message):
         return
     recent_starts[message.from_user.id] = now
 
-    await get_or_create_user(message)
+    user = await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
-    await message.answer(welcome_text(), reply_markup=main_menu(), parse_mode="HTML", link_preview_options=no_preview())
+    await message.answer(
+        f"{welcome_text()}\n\nТекущая нейросеть: {model_display_name(user['selected_model'])}",
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+        link_preview_options=no_preview(),
+    )
 
 
 @dp.message(Command("account"))
@@ -869,22 +874,15 @@ async def set_model_callback(callback: CallbackQuery):
         await conn.execute("UPDATE users SET selected_model=$1 WHERE telegram_id=$2", model, callback.from_user.id)
 
     await log_event(callback.from_user.id, "model_select", model)
-    names = {
-        "gpt": "🌀 ChatGPT",
-        "claude": "✴️ Claude",
-        "gemini": "✦ Gemini",
-        "nanobanana": "🍌 Nano Banana",
-        "gptimage": "🎨 GPT Image",
-    }
+
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.delete()
     except Exception:
         pass
 
-    await callback.message.answer(
-        f"✅ Нейросеть выбрана:
-
-{names.get(model)}",
+    await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос или выберите действие ниже.",
         reply_markup=main_menu(),
     )
 
@@ -1049,25 +1047,30 @@ async def chat_handler(message: Message):
     selected_model = user["selected_model"]
 
     if selected_model in {"nanobanana", "gptimage"}:
-        wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🎨 Генерирую изображение..."
+        wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🌀 Генерирую изображение..."
         wait_message = await message.answer(wait_text)
         try:
             await save_message(message.from_user.id, "user", message.text)
+
             if selected_model == "nanobanana":
                 image_bytes, text_note = await generate_nano_banana_image(message.text)
             else:
                 image_bytes, text_note = await generate_gpt_image(message.text)
 
             if not image_bytes:
-                await wait_message.edit_text(text_note or "⚠️ Nano Banana не вернул изображение. Попробуйте другой запрос.")
+                await wait_message.edit_text(
+                    text_note or "⚠️ Генерация не вернула изображение. Попробуйте другой запрос.",
+                    reply_markup=main_menu(),
+                )
                 return
 
-            filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
+            filename = "nano_banana.png" if selected_model == "nanobanana" else "sora_gpt_image.png"
             photo = BufferedInputFile(image_bytes, filename=filename)
             await wait_message.delete()
             await message.answer_photo(
                 photo=photo,
-                caption=(text_note[:900] if text_note else "🍌 Готово"),
+                caption=(text_note[:900] if text_note else "✅ Готово"),
+                reply_markup=main_menu(),
             )
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
@@ -1077,19 +1080,21 @@ async def chat_handler(message: Message):
 
         except Exception as e:
             admin_error = short_error_text(e)
-            print(f"IMAGE ERROR SHORT:
-{admin_error}")
-            print(f"IMAGE ERROR TRACE:
-{traceback.format_exc()}")
+            print(f"IMAGE ERROR SHORT:\n{admin_error}")
+            print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
             await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
             try:
-                await wait_message.edit_text("⚠️ Генерация изображений временно недоступна.
-
-Попробуйте позже или выберите другую нейросеть.")
+                await wait_message.edit_text(
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
+                    "Попробуйте позже или выберите другую нейросеть.",
+                    reply_markup=main_menu(),
+                )
             except Exception:
-                await message.answer("⚠️ Генерация изображений временно недоступна.
-
-Попробуйте позже или выберите другую нейросеть.")
+                await message.answer(
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
+                    "Попробуйте позже или выберите другую нейросеть.",
+                    reply_markup=main_menu(),
+                )
             return
 
     wait_message = await message.answer("Печатает ответ...")
@@ -1107,9 +1112,9 @@ async def chat_handler(message: Message):
         await log_event(message.from_user.id, "ai_message", selected_model)
 
         if len(answer) <= 3900:
-            await wait_message.edit_text(answer)
+            await wait_message.edit_text(answer, reply_markup=main_menu())
         else:
-            await wait_message.edit_text(answer[:3900])
+            await wait_message.edit_text(answer[:3900], reply_markup=main_menu())
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
@@ -1118,21 +1123,19 @@ async def chat_handler(message: Message):
         print(f"AI ERROR SHORT:\n{admin_error}")
         print(f"AI ERROR TRACE:\n{traceback.format_exc()}")
 
-        await send_ai_error_to_admin(
-            "⚠️ AI ERROR\n\n"
-            f"Model: {selected_model}\n"
-            f"Error: {admin_error}"
-        )
+        await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
 
         try:
             await wait_message.edit_text(
                 "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
-                "Попробуйте позже или выберите другую нейросеть."
+                "Попробуйте позже или выберите другую нейросеть.",
+                reply_markup=main_menu(),
             )
         except Exception:
             await message.answer(
                 "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
-                "Попробуйте позже или выберите другую нейросеть."
+                "Попробуйте позже или выберите другую нейросеть.",
+                reply_markup=main_menu(),
             )
 
 
