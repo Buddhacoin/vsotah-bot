@@ -18,12 +18,17 @@ from aiogram.types import (
     LinkPreviewOptions,
 )
 from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
 
 ADMIN_IDS = {
     int(x.strip())
@@ -67,6 +72,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+anthropic_client = AsyncAnthropic(
+    api_key=ANTHROPIC_API_KEY,
+) if ANTHROPIC_API_KEY else None
 
 deepseek_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -526,19 +535,62 @@ async def user_profile_text(user):
     return text
 
 
-async def ai_router(selected_model: str, messages: list[dict]):
-    system_message = {
-        "role": "system",
-        "content": (
-            "Ты профессиональный AI-ассистент. "
-            "Отвечай понятно, структурно и по делу. "
-            "Если пользователь пишет на русском — отвечай на русском."
-        ),
-    }
+def normalize_anthropic_messages(messages: list[dict]):
+    result = []
 
-    full_messages = [system_message, *messages]
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+
+        if not content:
+            continue
+
+        if role == "user":
+            result.append({"role": "user", "content": content})
+        elif role == "assistant":
+            result.append({"role": "assistant", "content": content})
+
+    if not result:
+        result.append({"role": "user", "content": "Привет"})
+
+    return result
+
+
+async def ai_router(selected_model: str, messages: list[dict]):
+    system_text = (
+        "Ты профессиональный AI-ассистент. "
+        "Отвечай понятно, структурно и по делу. "
+        "Если пользователь пишет на русском — отвечай на русском."
+    )
+
+    if selected_model == "claude":
+        if not anthropic_client:
+            return (
+                "⚠️ Claude пока не подключён.\n\n"
+                "Администратору нужно добавить ANTHROPIC_API_KEY в Railway."
+            )
+
+        response = await anthropic_client.messages.create(
+            model=ANTHROPIC_TEXT_MODEL,
+            max_tokens=2500,
+            temperature=0.7,
+            system=system_text,
+            messages=normalize_anthropic_messages(messages),
+        )
+
+        parts = []
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                parts.append(block.text)
+
+        return "\n".join(parts).strip()
 
     if selected_model == "deepseek" and deepseek_client:
+        full_messages = [
+            {"role": "system", "content": system_text},
+            *messages,
+        ]
+
         response = await deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=full_messages,
@@ -553,8 +605,13 @@ async def ai_router(selected_model: str, messages: list[dict]):
             "Пока выберите ChatGPT или Claude для текстового ответа."
         )
 
+    full_messages = [
+        {"role": "system", "content": system_text},
+        *messages,
+    ]
+
     response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=OPENAI_TEXT_MODEL,
         messages=full_messages,
         temperature=0.7,
     )
@@ -1109,3 +1166,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
