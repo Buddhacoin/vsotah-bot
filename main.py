@@ -187,7 +187,7 @@ def period_menu(plan: str):
 def payment_method_menu(plan: str, months: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Банковская карта / СБП", callback_data=f"pay_tribute_{plan}_{months}")],
+            [InlineKeyboardButton(text="💳 Карта / СБП — скоро", callback_data="rub_payment_disabled")],
             [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
             [InlineKeyboardButton(text="← Назад", callback_data=f"tariff_{plan}")],
         ]
@@ -853,23 +853,40 @@ async def create_tribute_session(telegram_id: int, plan: str, months: int) -> st
 async def find_pending_tribute_session(plan: str | None, months: int | None):
     if not plan or not months:
         return None
+
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
+        session = await conn.fetchrow(
             """
             SELECT * FROM tribute_sessions
             WHERE plan=$1
               AND months=$2
-              AND status IN ('created', 'clicked')
-              AND created_at > NOW() - INTERVAL '6 hours'
-            ORDER BY created_at DESC
-            LIMIT 2
+              AND status='clicked'
+              AND clicked_at > NOW() - INTERVAL '45 minutes'
+            ORDER BY clicked_at DESC
+            LIMIT 1
             """,
             plan,
             months,
         )
-    if len(rows) == 1:
-        return rows[0]
-    return None
+
+        if session:
+            return session
+
+        session = await conn.fetchrow(
+            """
+            SELECT * FROM tribute_sessions
+            WHERE plan=$1
+              AND months=$2
+              AND status='created'
+              AND created_at > NOW() - INTERVAL '45 minutes'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            plan,
+            months,
+        )
+
+    return session
 
 
 async def record_tribute_payment_and_activate(telegram_id: int, plan: str, months: int, amount: int, payload: dict, external_id: str = ""):
@@ -1119,6 +1136,12 @@ async def period_callback(callback: CallbackQuery):
         f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена в Stars: ⭐ {price}",
         reply_markup=payment_method_menu(plan, months),
     )
+
+
+@dp.callback_query(F.data == "rub_payment_disabled")
+async def rub_payment_disabled_callback(callback: CallbackQuery):
+    await callback.answer("Оплата рублями скоро будет доступна", show_alert=True)
+    await log_event(callback.from_user.id, "rub_payment_disabled_click")
 
 
 @dp.callback_query(F.data.startswith("pay_tribute_"))
