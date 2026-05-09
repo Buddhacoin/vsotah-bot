@@ -1,12 +1,15 @@
-import asyncio 
+import asyncio
 import base64
+import json
 import os
+import secrets
 import time
 import traceback
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import asyncpg
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
@@ -32,6 +35,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+TRIBUTE_API_KEY = os.getenv("TRIBUTE_API_KEY")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://gptclaude-bot-production.up.railway.app").rstrip("/")
+PORT = int(os.getenv("PORT", "8080"))
 
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
 ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
@@ -179,12 +185,21 @@ def period_menu(plan: str):
 
 
 def payment_method_menu(plan: str, months: int):
-    tribute_url = TRIBUTE_LINKS[plan][months]
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Банковская карта / СБП", url=tribute_url)],
+            [InlineKeyboardButton(text="💳 Карта / СБП — скоро", callback_data="rub_payment_disabled")],
             [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
             [InlineKeyboardButton(text="← Назад", callback_data=f"tariff_{plan}")],
+        ]
+    )
+
+
+def tribute_open_payment_menu(payment_url: str, plan: str, months: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Открыть оплату картой / СБП", url=payment_url)],
+            [InlineKeyboardButton(text="⭐ Оплатить Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
+            [InlineKeyboardButton(text="← Назад", callback_data=f"period_{plan}_{months}")],
         ]
     )
 
@@ -301,6 +316,19 @@ async def init_db():
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS months INTEGER DEFAULT 1;")
 
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tribute_sessions (
+                token TEXT PRIMARY KEY,
+                telegram_id BIGINT NOT NULL,
+                plan TEXT NOT NULL,
+                months INTEGER NOT NULL,
+                tribute_url TEXT NOT NULL,
+                status TEXT DEFAULT 'created',
+                created_at TIMESTAMP DEFAULT NOW(),
+                clicked_at TIMESTAMP
+            );
+        """)
+
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS spam_state (
                 telegram_id BIGINT PRIMARY KEY,
                 window_start BIGINT DEFAULT 0,
@@ -342,12 +370,8 @@ async def setup_bot_info():
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
-    try:
-        await bot.set_my_description("""ChatGPT, Claude, Gemini и другие.
-Support: @LightningNewsSupport""")
-        await bot.set_my_short_description("ChatGPT, Claude, Gemini и генерация изображений")
-    except Exception as e:
-        print(f"BOT DESCRIPTION ERROR: {e}")
+    # Описание и вступление бота НЕ трогаем из кода.
+    # Их настраиваем вручную через BotFather, чтобы деплой не перезаписывал текст.
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -701,6 +725,304 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
         )
 
 
+def get_tribute_slug(url: str) -> str:
+    return url.rstrip("/").split("/")[-1]
+
+
+def tribute_slug_map():
+    result = {}
+    for plan, months_map in TRIBUTE_LINKS.items():
+        for months, url in months_map.items():
+            result[get_tribute_slug(url)] = (plan, months)
+    return result
+
+
+def collect_values(obj):
+    values = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            values.append((str(key), value))
+            values.extend(collect_values(value))
+    elif isinstance(obj, list):
+        for item in obj:
+            values.extend(collect_values(item))
+    return values
+
+
+def find_telegram_id_in_payload(payload) -> int | None:
+    keys = {
+        "telegram_id", "telegramid", "tg_id", "tgid", "telegram_user_id",
+        "telegramuserid", "telegram_userid", "buyer_telegram_id",
+        "customer_telegram_id", "user_telegram_id",
+    }
+    for key, value in collect_values(payload):
+        normalized_key = key.lower().replace("-", "_")
+        compact_key = normalized_key.replace("_", "")
+        if normalized_key in keys or compact_key in keys:
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+    return None
+
+
+def find_amount_in_payload(payload) -> int:
+    amount_keys = {"amount", "price", "total", "sum", "total_amount", "paid_amount"}
+    for key, value in collect_values(payload):
+        normalized_key = key.lower().replace("-", "_")
+        if normalized_key in amount_keys:
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(round(value))
+            if isinstance(value, str):
+                cleaned = value.replace(" ", "").replace("₽", "").replace("руб", "").replace(",", ".")
+                try:
+                    return int(round(float(cleaned)))
+                except Exception:
+                    pass
+    return 0
+
+
+def find_external_payment_id(payload) -> str:
+    id_keys = {"id", "payment_id", "transaction_id", "order_id", "invoice_id", "subscription_id"}
+    for key, value in collect_values(payload):
+        normalized_key = key.lower().replace("-", "_")
+        if normalized_key in id_keys and value:
+            return str(value)[:200]
+    return ""
+
+
+def is_tribute_payment_success(payload) -> bool:
+    text = json.dumps(payload, ensure_ascii=False).lower()
+    if "test" in text and "payment" not in text:
+        return False
+    success_words = [
+        "paid", "payment_succeeded", "payment.succeeded", "successful",
+        "success", "completed", "confirmed", "approved", "оплачен", "оплата",
+    ]
+    cancel_words = ["failed", "cancel", "refunded", "refund", "declined", "expired"]
+    if any(word in text for word in cancel_words):
+        return False
+    return any(word in text for word in success_words)
+
+
+def find_plan_months_in_payload(payload) -> tuple[str | None, int | None]:
+    text = json.dumps(payload, ensure_ascii=False)
+    lower_text = text.lower()
+
+    for slug, plan_months in tribute_slug_map().items():
+        if slug.lower() in lower_text:
+            return plan_months
+
+    plan = None
+    if "безлимит" in lower_text or "vip" in lower_text:
+        plan = "VIP"
+    elif "1400" in lower_text or "pro" in lower_text:
+        plan = "PRO"
+    elif "500" in lower_text or "plus" in lower_text:
+        plan = "PLUS"
+
+    months = None
+    for value in (12, 6, 3, 1):
+        if f"{value} месяц" in lower_text or f"{value} мес" in lower_text or f"{value}m" in lower_text:
+            months = value
+            break
+
+    return plan, months
+
+
+async def create_tribute_session(telegram_id: int, plan: str, months: int) -> str:
+    token = secrets.token_urlsafe(24)
+    tribute_url = TRIBUTE_LINKS[plan][months]
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO tribute_sessions (token, telegram_id, plan, months, tribute_url)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            token,
+            telegram_id,
+            plan,
+            months,
+            tribute_url,
+        )
+    return f"{PUBLIC_BASE_URL}/start-buy?token={token}"
+
+
+async def find_pending_tribute_session(plan: str | None, months: int | None):
+    if not plan or not months:
+        return None
+
+    async with db_pool.acquire() as conn:
+        session = await conn.fetchrow(
+            """
+            SELECT * FROM tribute_sessions
+            WHERE plan=$1
+              AND months=$2
+              AND status='clicked'
+              AND clicked_at > NOW() - INTERVAL '45 minutes'
+            ORDER BY clicked_at DESC
+            LIMIT 1
+            """,
+            plan,
+            months,
+        )
+
+        if session:
+            return session
+
+        session = await conn.fetchrow(
+            """
+            SELECT * FROM tribute_sessions
+            WHERE plan=$1
+              AND months=$2
+              AND status='created'
+              AND created_at > NOW() - INTERVAL '45 minutes'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            plan,
+            months,
+        )
+
+    return session
+
+
+async def record_tribute_payment_and_activate(telegram_id: int, plan: str, months: int, amount: int, payload: dict, external_id: str = ""):
+    raw_payload = json.dumps(payload, ensure_ascii=False)[:12000]
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO payments (
+                telegram_id, plan, months, amount, currency, payload,
+                telegram_payment_charge_id, provider_payment_charge_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            telegram_id,
+            plan,
+            months,
+            amount,
+            "RUB",
+            raw_payload,
+            external_id,
+            external_id,
+        )
+        await conn.execute(
+            """
+            UPDATE tribute_sessions
+            SET status='paid'
+            WHERE telegram_id=$1 AND plan=$2 AND months=$3 AND status IN ('created', 'clicked')
+            """,
+            telegram_id,
+            plan,
+            months,
+        )
+
+    await activate_plan(telegram_id, plan, months)
+
+    try:
+        await bot.send_message(
+            telegram_id,
+            f"✅ Оплата через банковскую карту / СБП прошла успешно!\n\nТариф {plan} активирован на {months} мес.",
+            reply_markup=main_menu(),
+        )
+    except Exception as e:
+        print(f"TRIBUTE USER NOTIFY ERROR: {e}")
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"💳 Tribute оплата активирована\n\nID: {telegram_id}\nТариф: {plan}\nПериод: {months} мес.\nСумма: {amount} RUB",
+            )
+        except Exception:
+            pass
+
+
+async def handle_start_buy(request: web.Request):
+    token = request.query.get("token", "")
+    if not token:
+        return web.Response(text="Payment token is missing", status=400)
+
+    async with db_pool.acquire() as conn:
+        session = await conn.fetchrow("SELECT * FROM tribute_sessions WHERE token=$1", token)
+        if not session:
+            return web.Response(text="Payment session not found", status=404)
+        await conn.execute("UPDATE tribute_sessions SET status='clicked', clicked_at=NOW() WHERE token=$1", token)
+
+    raise web.HTTPFound(session["tribute_url"])
+
+
+async def handle_tribute_webhook(request: web.Request):
+    try:
+        try:
+            payload = await request.json()
+        except Exception:
+            raw_text = await request.text()
+            payload = {"raw": raw_text}
+
+        await log_event(None, "tribute_webhook_raw", json.dumps(payload, ensure_ascii=False)[:1000])
+
+        if not is_tribute_payment_success(payload):
+            return web.json_response({"ok": True, "status": "ignored_non_success_event"})
+
+        plan, months = find_plan_months_in_payload(payload)
+        telegram_id = find_telegram_id_in_payload(payload)
+
+        if not telegram_id:
+            session = await find_pending_tribute_session(plan, months)
+            if session:
+                telegram_id = session["telegram_id"]
+                plan = session["plan"]
+                months = session["months"]
+
+        if not telegram_id or not plan or not months or plan not in TARIFFS:
+            details = json.dumps(payload, ensure_ascii=False)[:2500]
+            await log_event(None, "tribute_webhook_unmatched", details)
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        "⚠️ Tribute webhook пришёл, но не удалось понять пользователя/тариф.\n\n"
+                        f"plan={plan}, months={months}, telegram_id={telegram_id}\n\n"
+                        f"payload: {details[:1500]}",
+                    )
+                except Exception:
+                    pass
+            return web.json_response({"ok": False, "error": "cannot_match_payment"}, status=202)
+
+        amount = find_amount_in_payload(payload)
+        external_id = find_external_payment_id(payload)
+        await record_tribute_payment_and_activate(telegram_id, plan, months, amount, payload, external_id)
+        return web.json_response({"ok": True, "activated": True, "telegram_id": telegram_id, "plan": plan, "months": months})
+
+    except Exception as e:
+        print(f"TRIBUTE WEBHOOK ERROR: {e}")
+        print(traceback.format_exc())
+        return web.json_response({"ok": False, "error": short_error_text(e)}, status=500)
+
+
+async def handle_health(request: web.Request):
+    return web.json_response({"ok": True, "service": "gptclaude-bot"})
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/start-buy", handle_start_buy)
+    app.router.add_post("/tribute-webhook", handle_tribute_webhook)
+    app.router.add_get("/tribute-webhook", handle_health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"WEB SERVER STARTED ON PORT {PORT}")
+    return runner
+
+
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     now = time.time()
@@ -813,6 +1135,32 @@ async def period_callback(callback: CallbackQuery):
         callback,
         f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена в Stars: ⭐ {price}",
         reply_markup=payment_method_menu(plan, months),
+    )
+
+
+@dp.callback_query(F.data == "rub_payment_disabled")
+async def rub_payment_disabled_callback(callback: CallbackQuery):
+    await callback.answer("Оплата рублями скоро будет доступна", show_alert=True)
+    await log_event(callback.from_user.id, "rub_payment_disabled_click")
+
+
+@dp.callback_query(F.data.startswith("pay_tribute_"))
+async def pay_tribute_callback(callback: CallbackQuery):
+    await callback.answer()
+    _, _, plan, months = callback.data.split("_")
+    months = int(months)
+    if plan not in TARIFFS or months not in TRIBUTE_LINKS[plan]:
+        await safe_edit_or_send(callback, "⚠️ Этот способ оплаты сейчас недоступен.", reply_markup=tariffs_menu())
+        return
+
+    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    payment_url = await create_tribute_session(callback.from_user.id, plan, months)
+    await log_event(callback.from_user.id, "tribute_payment_open", f"{plan} {months}")
+
+    await safe_edit_or_send(
+        callback,
+        f"💳 Оплата банковской картой / СБП\n\nТариф: {plan}\nПериод: {months} мес.\n\nПосле оплаты бот автоматически активирует подписку.",
+        reply_markup=tribute_open_payment_menu(payment_url, plan, months),
     )
 
 
@@ -1175,6 +1523,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await init_db()
     await setup_bot_info()
+    await start_web_server()
 
     print("DATABASE CONNECTED")
     print("BOT STARTED")
