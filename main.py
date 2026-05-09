@@ -235,27 +235,18 @@ def welcome_text():
 
 
 def premium_text():
-    return (
-        "💳 Купить подписку
+    return """💳 Купить подписку
 
-"
-        "⭐ PLUS — 500 запросов в неделю
-"
-        "💎 PRO — 1400 запросов в неделю
-"
-        "👑 VIP — безлимит"
-    )
+⭐ PLUS — 500 запросов в неделю
+💎 PRO — 1400 запросов в неделю
+👑 VIP — безлимит"""
 
 
 def channels_text():
-    return (
-        "🧠 Наши каналы:
+    return """🧠 Наши каналы:
 
-"
-        "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
-"
-        "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"
-    )
+• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
+• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"""
 
 
 async def init_db():
