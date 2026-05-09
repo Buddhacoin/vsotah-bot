@@ -214,38 +214,24 @@ def model_display_name(model: str) -> str:
 
 
 def welcome_text():
-    return (
-        "👋 Добро пожаловать в @GPTclaudeAIbot
+    return """👋 Добро пожаловать в @GPTclaudeAIbot
 
-"
-        "Ваш AI-бот для работы с нейросетями в одном месте.
+Ваш AI-бот для работы с нейросетями в одном месте.
 
-"
-        "📝 Генерация текста:
-"
-        "• ChatGPT
-"
-        "• Claude
-"
-        "• Gemini
+📝 Генерация текста:
+• ChatGPT
+• Claude
+• Gemini
 
-"
-        "🌇 Генерация изображений:
-"
-        "• Nano Banana Pro
-"
-        "• Sora GPT Image
+🌇 Генерация изображений:
+• Nano Banana Pro
+• Sora GPT Image
 
-"
-        "🧠 Наши каналы:
-"
-        "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
-"
-        "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>
+🧠 Наши каналы:
+• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
+• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>
 
-"
-        "Напишите вопрос или выберите действие ниже."
-    )
+Напишите вопрос или выберите действие ниже."""
 
 
 def premium_text():
@@ -1297,4 +1283,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
