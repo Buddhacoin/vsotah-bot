@@ -1,8 +1,10 @@
-import asyncio
+import asyncio 
+import base64
 import os
 import time
 import traceback
 from datetime import date, datetime, timedelta
+from io import BytesIO
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
@@ -16,14 +18,26 @@ from aiogram.types import (
     LabeledPrice,
     BotCommand,
     LinkPreviewOptions,
+    BufferedInputFile,
 )
 from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
+GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
 
 ADMIN_IDS = {
     int(x.strip())
@@ -59,6 +73,27 @@ TARIFFS = {
     },
 }
 
+TRIBUTE_LINKS = {
+    "PLUS": {
+        1: "https://web.tribute.tg/p/vJ9",
+        3: "https://web.tribute.tg/p/vJc",
+        6: "https://web.tribute.tg/p/vJd",
+        12: "https://web.tribute.tg/p/vJe",
+    },
+    "PRO": {
+        1: "https://web.tribute.tg/p/vJg",
+        3: "https://web.tribute.tg/p/vJh",
+        6: "https://web.tribute.tg/p/vJi",
+        12: "https://web.tribute.tg/p/vJj",
+    },
+    "VIP": {
+        1: "https://web.tribute.tg/p/vJk",
+        3: "https://web.tribute.tg/p/vJl",
+        6: "https://web.tribute.tg/p/vJm",
+        12: "https://web.tribute.tg/p/vJo",
+    },
+}
+
 SPAM_WINDOW_SECONDS = 8
 SPAM_MAX_MESSAGES = 5
 SPAM_BLOCK_SECONDS = 60
@@ -67,6 +102,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+google_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
 
 deepseek_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -88,12 +125,8 @@ def main_menu():
                 InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
                 InlineKeyboardButton(text="💳 Купить подписку", callback_data="premium"),
             ],
-            [
-                InlineKeyboardButton(text="🤖 Выбрать нейросеть", callback_data="models"),
-            ],
-            [
-                InlineKeyboardButton(text="🧠 Наши каналы", callback_data="channels"),
-            ],
+            [InlineKeyboardButton(text="🤖 Выбрать нейросеть", callback_data="models")],
+            [InlineKeyboardButton(text="🧠 Наши каналы", callback_data="channels")],
         ]
     )
 
@@ -101,9 +134,11 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🧠 ChatGPT", callback_data="set_model_gpt")],
-            [InlineKeyboardButton(text="🟣 Claude", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="🌀 ChatGPT", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="✴️ Claude", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="✦ Gemini", callback_data="set_model_gemini")],
             [InlineKeyboardButton(text="🍌 Nano Banana", callback_data="set_model_nanobanana")],
+            [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -132,7 +167,6 @@ def channels_menu():
 
 def period_menu(plan: str):
     prices = TARIFFS[plan]["prices"]
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"1 месяц — ⭐ {prices[1]}", callback_data=f"period_{plan}_1")],
@@ -145,9 +179,11 @@ def period_menu(plan: str):
 
 
 def payment_method_menu(plan: str, months: int):
+    tribute_url = TRIBUTE_LINKS[plan][months]
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⭐ Оплатить Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
+            [InlineKeyboardButton(text="💳 Банковская карта / СБП", url=tribute_url)],
+            [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
             [InlineKeyboardButton(text="← Назад", callback_data=f"tariff_{plan}")],
         ]
     )
@@ -166,37 +202,51 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+def model_display_name(model: str) -> str:
+    names = {
+        "gpt": "🌀 ChatGPT",
+        "claude": "✴️ Claude",
+        "gemini": "✦ Gemini",
+        "nanobanana": "🍌 Nano Banana",
+        "gptimage": "🌀 Sora GPT Image",
+    }
+    return names.get(model, "🌀 ChatGPT")
+
+
 def welcome_text():
-    return (
-        "👋 Добро пожаловать в @GPTclaudeAIbot\n\n"
-        "Ваш AI-бот для работы с нейросетями в одном месте.\n\n"
-        "📝 Генерация текста:\n"
-        "• ChatGPT\n"
-        "• Claude\n\n"
-        "🌇 Генерация изображений:\n"
-        "• Nano Banana Pro\n\n"
-        "🧠 Наши каналы:\n"
-        "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>\n"
-        "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>\n\n"
-        "Напишите вопрос или выберите действие ниже."
-    )
+    return """👋 Добро пожаловать в @GPTclaudeAIbot
+
+Ваш AI-бот для работы с нейросетями в одном месте.
+
+📝 Генерация текста:
+• ChatGPT
+• Claude
+• Gemini
+
+🌇 Генерация изображений:
+• Nano Banana Pro
+• Sora GPT Image
+
+🧠 Наши каналы:
+• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
+• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>
+
+Напишите вопрос или выберите действие ниже."""
 
 
 def premium_text():
-    return (
-        "💳 Купить подписку\n\n"
-        "⭐ PLUS — 500 запросов в неделю\n"
-        "💎 PRO — 1400 запросов в неделю\n"
-        "👑 VIP — безлимит"
-    )
+    return """💳 Купить подписку
+
+⭐ PLUS — 500 запросов в неделю
+💎 PRO — 1400 запросов в неделю
+👑 VIP — безлимит"""
 
 
 def channels_text():
-    return (
-        "🧠 Наши каналы:\n\n"
-        "• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>\n"
-        "• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"
-    )
+    return """🧠 Наши каналы:
+
+• Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
+• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"""
 
 
 async def init_db():
@@ -218,7 +268,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_until TIMESTAMP;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_model TEXT DEFAULT 'gpt';")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_used INTEGER DEFAULT 0;")
@@ -249,7 +298,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS months INTEGER DEFAULT 1;")
 
         await conn.execute("""
@@ -275,10 +323,12 @@ async def init_db():
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO events (telegram_id, event_type, details)
-                VALUES ($1, $2, $3)
-            """, telegram_id, event_type, details[:1000])
+            await conn.execute(
+                "INSERT INTO events (telegram_id, event_type, details) VALUES ($1, $2, $3)",
+                telegram_id,
+                event_type,
+                details[:1000],
+            )
     except Exception as e:
         print(f"LOG EVENT ERROR: {e}")
 
@@ -292,14 +342,10 @@ async def setup_bot_info():
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
-
     try:
-        await bot.set_my_description(
-            "AI-бот для работы с ChatGPT, Claude и Nano Banana."
-        )
-        await bot.set_my_short_description(
-            "ChatGPT, Claude и Nano Banana в Telegram"
-        )
+        await bot.set_my_description("""ChatGPT, Claude, Gemini и другие.
+Support: @LightningNewsSupport""")
+        await bot.set_my_short_description("ChatGPT, Claude, Gemini и генерация изображений")
     except Exception as e:
         print(f"BOT DESCRIPTION ERROR: {e}")
 
@@ -313,43 +359,25 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
 
         if not user:
             await conn.execute("""
-                INSERT INTO users 
-                (telegram_id, username, first_name, day_start, week_start)
+                INSERT INTO users (telegram_id, username, first_name, day_start, week_start)
                 VALUES ($1, $2, $3, $4, $5)
             """, telegram_id, username, first_name, today, week_start)
             await log_event(telegram_id, "new_user", username or "")
-
         else:
-            await conn.execute("""
-                UPDATE users
-                SET username=$2, first_name=$3
-                WHERE telegram_id=$1
-            """, telegram_id, username, first_name)
+            await conn.execute("UPDATE users SET username=$2, first_name=$3 WHERE telegram_id=$1", telegram_id, username, first_name)
 
         user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
         if user["day_start"] != today:
-            await conn.execute("""
-                UPDATE users
-                SET daily_used=0, day_start=$2
-                WHERE telegram_id=$1
-            """, telegram_id, today)
+            await conn.execute("UPDATE users SET daily_used=0, day_start=$2 WHERE telegram_id=$1", telegram_id, today)
 
         if user["week_start"] != week_start:
-            await conn.execute("""
-                UPDATE users
-                SET weekly_used=0, week_start=$2
-                WHERE telegram_id=$1
-            """, telegram_id, week_start)
+            await conn.execute("UPDATE users SET weekly_used=0, week_start=$2 WHERE telegram_id=$1", telegram_id, week_start)
 
         user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
         if user["plan"] != "FREE" and user["plan_until"] and user["plan_until"] < datetime.utcnow():
-            await conn.execute("""
-                UPDATE users
-                SET plan='FREE', plan_until=NULL
-                WHERE telegram_id=$1
-            """, telegram_id)
+            await conn.execute("UPDATE users SET plan='FREE', plan_until=NULL WHERE telegram_id=$1", telegram_id)
             await log_event(telegram_id, "plan_expired", user["plan"])
 
         return await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
@@ -380,30 +408,18 @@ async def check_spam(telegram_id: int):
             return False, state["blocked_until"] - now
 
         if now - state["window_start"] > SPAM_WINDOW_SECONDS:
-            await conn.execute("""
-                UPDATE spam_state
-                SET window_start=$2, message_count=1, blocked_until=0
-                WHERE telegram_id=$1
-            """, telegram_id, now)
+            await conn.execute("UPDATE spam_state SET window_start=$2, message_count=1, blocked_until=0 WHERE telegram_id=$1", telegram_id, now)
             return True, None
 
         new_count = state["message_count"] + 1
 
         if new_count > SPAM_MAX_MESSAGES:
             blocked_until = now + SPAM_BLOCK_SECONDS
-            await conn.execute("""
-                UPDATE spam_state
-                SET message_count=$2, blocked_until=$3
-                WHERE telegram_id=$1
-            """, telegram_id, new_count, blocked_until)
+            await conn.execute("UPDATE spam_state SET message_count=$2, blocked_until=$3 WHERE telegram_id=$1", telegram_id, new_count, blocked_until)
             await log_event(telegram_id, "spam_block", str(SPAM_BLOCK_SECONDS))
             return False, SPAM_BLOCK_SECONDS
 
-        await conn.execute("""
-            UPDATE spam_state
-            SET message_count=$2
-            WHERE telegram_id=$1
-        """, telegram_id, new_count)
+        await conn.execute("UPDATE spam_state SET message_count=$2 WHERE telegram_id=$1", telegram_id, new_count)
 
     return True, None
 
@@ -422,7 +438,6 @@ async def check_limit(user):
         return True, None
 
     weekly_limit = PLAN_WEEKLY_LIMITS.get(plan)
-
     if weekly_limit is not None and user["weekly_used"] >= weekly_limit:
         return False, f"{plan}_WEEK_LIMIT"
 
@@ -441,10 +456,7 @@ async def increase_usage(telegram_id):
 
 async def save_message(telegram_id, role, content):
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO messages (telegram_id, role, content)
-            VALUES ($1, $2, $3)
-        """, telegram_id, role, content[:12000])
+        await conn.execute("INSERT INTO messages (telegram_id, role, content) VALUES ($1, $2, $3)", telegram_id, role, content[:12000])
 
 
 async def get_chat_history(telegram_id, limit=10):
@@ -461,7 +473,6 @@ async def get_chat_history(telegram_id, limit=10):
     for row in reversed(rows):
         if row["role"] in {"user", "assistant", "system"}:
             history.append({"role": row["role"], "content": row["content"]})
-
     return history
 
 
@@ -473,14 +484,12 @@ async def clear_chat(telegram_id):
 
 async def activate_plan(telegram_id: int, plan: str, months: int):
     until = add_months_rough(months)
-
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE users
             SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0
             WHERE telegram_id=$1
         """, telegram_id, plan, until)
-
     await log_event(telegram_id, "activate_plan", f"{plan} {months} months")
 
 
@@ -488,8 +497,9 @@ async def user_profile_text(user):
     model_names = {
         "gpt": "ChatGPT",
         "claude": "Claude",
-        "nanobanana": "Nano Banana",
         "gemini": "Gemini",
+        "nanobanana": "Nano Banana",
+        "gptimage": "Sora GPT Image",
         "deepseek": "DeepSeek",
     }
 
@@ -522,23 +532,79 @@ async def user_profile_text(user):
         "💎 PRO — 1400 запросов в неделю\n"
         "👑 VIP — безлимит"
     )
-
     return text
 
 
-async def ai_router(selected_model: str, messages: list[dict]):
-    system_message = {
-        "role": "system",
-        "content": (
-            "Ты профессиональный AI-ассистент. "
-            "Отвечай понятно, структурно и по делу. "
-            "Если пользователь пишет на русском — отвечай на русском."
-        ),
-    }
+def normalize_anthropic_messages(messages: list[dict]):
+    result = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if not content:
+            continue
+        if role == "user":
+            result.append({"role": "user", "content": content})
+        elif role == "assistant":
+            result.append({"role": "assistant", "content": content})
+    if not result:
+        result.append({"role": "user", "content": "Привет"})
+    return result
 
-    full_messages = [system_message, *messages]
+
+def messages_to_plain_text(messages: list[dict]) -> str:
+    lines = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+async def ai_router(selected_model: str, messages: list[dict]):
+    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
+    today_text = datetime.now().strftime("%A, %d.%m.%Y")
+    system_text = (
+        "Ты профессиональный AI-ассистент. "
+        "Отвечай понятно, структурно и по делу. "
+        "Если пользователь пишет на русском — отвечай на русском. "
+        f"Текущая дата и время: {current_datetime}. Сегодня: {today_text}."
+    )
+
+    if selected_model == "claude":
+        if not anthropic_client:
+            return "⚠️ Claude пока не подключён. Администратору нужно добавить ANTHROPIC_API_KEY в Railway."
+
+        response = await anthropic_client.messages.create(
+            model=ANTHROPIC_TEXT_MODEL,
+            max_tokens=2500,
+            temperature=0.7,
+            system=system_text,
+            messages=normalize_anthropic_messages(messages),
+        )
+        parts = []
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                parts.append(block.text)
+        return "\n".join(parts).strip()
+
+    if selected_model == "gemini":
+        if not google_client:
+            return "⚠️ Gemini пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
+
+        prompt = f"{system_text}\n\nИстория диалога:\n{messages_to_plain_text(messages)}"
+
+        def run_gemini():
+            response = google_client.models.generate_content(
+                model=GEMINI_TEXT_MODEL,
+                contents=prompt,
+            )
+            return getattr(response, "text", "") or ""
+
+        return (await asyncio.to_thread(run_gemini)).strip()
 
     if selected_model == "deepseek" and deepseek_client:
+        full_messages = [{"role": "system", "content": system_text}, *messages]
         response = await deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=full_messages,
@@ -546,26 +612,74 @@ async def ai_router(selected_model: str, messages: list[dict]):
         )
         return response.choices[0].message.content
 
-    if selected_model == "nanobanana":
-        return (
-            "🍌 Nano Banana пока готовится.\n\n"
-            "Скоро здесь будет генерация изображений. "
-            "Пока выберите ChatGPT или Claude для текстового ответа."
-        )
-
+    full_messages = [{"role": "system", "content": system_text}, *messages]
     response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=OPENAI_TEXT_MODEL,
         messages=full_messages,
         temperature=0.7,
     )
-
     return response.choices[0].message.content
+
+
+async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
+    if not google_client:
+        return None, "⚠️ Nano Banana пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
+
+    def run_image_generation():
+        response = google_client.models.generate_images(
+            model=NANO_BANANA_MODEL,
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="1:1",
+                person_generation="allow_adult",
+            ),
+        )
+
+        if not response.generated_images:
+            return None, "⚠️ Nano Banana не вернул изображение. Попробуйте другой запрос."
+
+        image_obj = response.generated_images[0].image
+
+        if hasattr(image_obj, "image_bytes") and image_obj.image_bytes:
+            return image_obj.image_bytes, "🍌 Готово"
+
+        buffer = BytesIO()
+        image_obj.save(buffer, format="PNG")
+        return buffer.getvalue(), "🍌 Готово"
+
+    return await asyncio.to_thread(run_image_generation)
+
+
+async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
+    def normalize_b64(value: str) -> bytes:
+        if value.startswith("data:image"):
+            value = value.split(",", 1)[1]
+        return base64.b64decode(value)
+
+    response = await client.images.generate(
+        model=GPT_IMAGE_MODEL,
+        prompt=prompt,
+        size="1024x1024",
+        quality="medium",
+        n=1,
+    )
+
+    item = response.data[0]
+    if getattr(item, "b64_json", None):
+        return normalize_b64(item.b64_json), "🌀 Готово"
+
+    return None, "⚠️ Sora GPT Image не вернул изображение. Попробуйте другой запрос."
+
+
+def short_error_text(error: Exception) -> str:
+    return str(error).replace("\n", " ")[:1200]
 
 
 async def send_ai_error_to_admin(error_text: str):
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, f"⚠️ AI ERROR\n\n{error_text[:3500]}")
+            await bot.send_message(admin_id, error_text[:3000])
         except Exception:
             pass
 
@@ -591,17 +705,14 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
 async def start_handler(message: Message):
     now = time.time()
     last = recent_starts.get(message.from_user.id, 0)
-
     if now - last < 2:
         return
-
     recent_starts[message.from_user.id] = now
 
-    await get_or_create_user(message)
+    user = await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
-
     await message.answer(
-        welcome_text(),
+        f"{welcome_text()}\n\nТекущая нейросеть: {model_display_name(user['selected_model'])}",
         reply_markup=main_menu(),
         parse_mode="HTML",
         link_preview_options=no_preview(),
@@ -618,10 +729,7 @@ async def account_command(message: Message):
 @dp.message(Command("premium"))
 async def premium_command(message: Message):
     await log_event(message.from_user.id, "premium_open")
-    await message.answer(
-        premium_text(),
-        reply_markup=tariffs_menu(),
-    )
+    await message.answer(premium_text(), reply_markup=tariffs_menu())
 
 
 @dp.message(Command("models"))
@@ -633,12 +741,7 @@ async def models_command(message: Message):
 @dp.message(Command("channels"))
 async def channels_command(message: Message):
     await log_event(message.from_user.id, "channels_command")
-    await message.answer(
-        channels_text(),
-        reply_markup=channels_menu(),
-        parse_mode="HTML",
-        link_preview_options=no_preview(),
-    )
+    await message.answer(channels_text(), reply_markup=channels_menu(), parse_mode="HTML", link_preview_options=no_preview())
 
 
 @dp.message(Command("deletecontext"))
@@ -656,13 +759,7 @@ async def back_main_callback(callback: CallbackQuery):
 @dp.callback_query(F.data == "profile")
 async def profile_callback(callback: CallbackQuery):
     await callback.answer("Открываю профиль...")
-
-    user = await get_or_create_user_by_data(
-        telegram_id=callback.from_user.id,
-        username=callback.from_user.username,
-        first_name=callback.from_user.first_name,
-    )
-
+    user = await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "profile_click")
     await callback.message.answer(await user_profile_text(user), reply_markup=main_menu())
 
@@ -671,25 +768,14 @@ async def profile_callback(callback: CallbackQuery):
 async def channels_callback(callback: CallbackQuery):
     await callback.answer()
     await log_event(callback.from_user.id, "channels_open")
-
-    await safe_edit_or_send(
-        callback,
-        channels_text(),
-        reply_markup=channels_menu(),
-        parse_mode="HTML",
-    )
+    await safe_edit_or_send(callback, channels_text(), reply_markup=channels_menu(), parse_mode="HTML")
 
 
 @dp.callback_query(F.data.in_({"premium", "plans"}))
 async def premium_callback(callback: CallbackQuery):
     await callback.answer()
     await log_event(callback.from_user.id, "premium_click")
-
-    await safe_edit_or_send(
-        callback,
-        premium_text(),
-        reply_markup=tariffs_menu(),
-    )
+    await safe_edit_or_send(callback, premium_text(), reply_markup=tariffs_menu())
 
 
 @dp.callback_query(F.data == "models")
@@ -702,21 +788,14 @@ async def models_callback(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("tariff_"))
 async def tariff_callback(callback: CallbackQuery):
     await callback.answer()
-
     plan = callback.data.replace("tariff_", "")
-
     if plan not in TARIFFS:
         return
-
     await log_event(callback.from_user.id, "tariff_select", plan)
-
     tariff = TARIFFS[plan]
-
     await safe_edit_or_send(
         callback,
-        f"🚀 {tariff['title']}\n\n"
-        f"{tariff['description']}\n\n"
-        "Выберите период подписки:",
+        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nВыберите период подписки:",
         reply_markup=period_menu(plan),
     )
 
@@ -724,23 +803,15 @@ async def tariff_callback(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("period_"))
 async def period_callback(callback: CallbackQuery):
     await callback.answer()
-
     _, plan, months = callback.data.split("_")
     months = int(months)
-
     if plan not in TARIFFS:
         return
-
     price = TARIFFS[plan]["prices"][months]
-
     await log_event(callback.from_user.id, "period_select", f"{plan} {months}")
-
     await safe_edit_or_send(
         callback,
-        f"⭐ Подтвердите оплату Telegram Stars:\n\n"
-        f"Тариф: {plan}\n"
-        f"Период: {months} мес.\n"
-        f"Цена: ⭐ {price}",
+        f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена в Stars: ⭐ {price}",
         reply_markup=payment_method_menu(plan, months),
     )
 
@@ -748,18 +819,13 @@ async def period_callback(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("pay_stars_"))
 async def pay_stars_callback(callback: CallbackQuery):
     await callback.answer()
-
     _, _, plan, months = callback.data.split("_")
     months = int(months)
-
     if plan not in TARIFFS:
         return
-
     price = TARIFFS[plan]["prices"][months]
     payload = f"plan:{plan}:months:{months}:user:{callback.from_user.id}:ts:{int(time.time())}"
-
     await log_event(callback.from_user.id, "invoice_open", f"{plan} {months} {price}")
-
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
         title=f"{plan} на {months} мес.",
@@ -774,11 +840,9 @@ async def pay_stars_callback(callback: CallbackQuery):
 @dp.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
     payload = pre_checkout_query.invoice_payload
-
     if not payload.startswith("plan:"):
         await pre_checkout_query.answer(ok=False, error_message="Некорректный платёж.")
         return
-
     await pre_checkout_query.answer(ok=True)
 
 
@@ -786,11 +850,9 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment_handler(message: Message):
     payment = message.successful_payment
     payload = payment.invoice_payload
-
     parts = payload.split(":")
     plan = None
     months = 1
-
     try:
         plan = parts[1]
         months = int(parts[3])
@@ -806,8 +868,7 @@ async def successful_payment_handler(message: Message):
             INSERT INTO payments (
                 telegram_id, plan, months, amount, currency, payload,
                 telegram_payment_charge_id, provider_payment_charge_id
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """,
             message.from_user.id,
             plan,
@@ -820,48 +881,32 @@ async def successful_payment_handler(message: Message):
         )
 
     await activate_plan(message.from_user.id, plan, months)
-
-    await message.answer(
-        f"✅ Оплата прошла успешно!\n\n"
-        f"Тариф {plan} активирован на {months} мес.",
-        reply_markup=main_menu(),
-    )
+    await message.answer(f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.", reply_markup=main_menu())
 
 
 @dp.callback_query(F.data.startswith("set_model_"))
 async def set_model_callback(callback: CallbackQuery):
     await callback.answer()
-
     model = callback.data.replace("set_model_", "")
-
-    allowed_models = {"gpt", "claude", "nanobanana"}
+    allowed_models = {"gpt", "claude", "gemini", "nanobanana", "gptimage"}
 
     if model not in allowed_models:
-        await safe_edit_or_send(
-            callback,
-            "⚠️ Эта модель сейчас недоступна.",
-            reply_markup=models_menu(),
-        )
+        await safe_edit_or_send(callback, "⚠️ Эта модель сейчас недоступна.", reply_markup=models_menu())
         return
 
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE users
-            SET selected_model=$1
-            WHERE telegram_id=$2
-        """, model, callback.from_user.id)
+        await conn.execute("UPDATE users SET selected_model=$1 WHERE telegram_id=$2", model, callback.from_user.id)
 
     await log_event(callback.from_user.id, "model_select", model)
 
-    names = {
-        "gpt": "🧠 ChatGPT",
-        "claude": "🟣 Claude",
-        "nanobanana": "🍌 Nano Banana",
-    }
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
-    await safe_edit_or_send(
-        callback,
-        f"✅ Нейросеть выбрана:\n\n{names.get(model)}",
+    await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос или выберите действие ниже.",
         reply_markup=main_menu(),
     )
 
@@ -870,7 +915,6 @@ async def set_model_callback(callback: CallbackQuery):
 async def admin_handler(message: Message):
     if not is_admin(message.from_user.id):
         return
-
     await message.answer(
         "🛠 Админ-панель\n\n"
         "/stats — общая статистика\n"
@@ -912,7 +956,7 @@ async def stats_handler(message: Message):
         f"PRO: {pro_users}\n"
         f"VIP: {vip_users}\n\n"
         f"Открытий премиума: {premium_clicks}\n"
-        f"Открытий оплаты: {invoices}\n"
+        f"Открытий оплаты Stars: {invoices}\n"
         f"Stars получено: {total_stars}"
     )
 
@@ -925,13 +969,10 @@ async def users_handler(message: Message):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT telegram_id, username, first_name, plan, weekly_used, created_at
-            FROM users
-            ORDER BY created_at DESC
-            LIMIT 15
+            FROM users ORDER BY created_at DESC LIMIT 15
         """)
 
     text = "👥 Последние пользователи\n\n"
-
     for row in rows:
         name = row["username"] or row["first_name"] or "без имени"
         text += (
@@ -941,7 +982,6 @@ async def users_handler(message: Message):
             f"Запросов за неделю: {row['weekly_used']}\n"
             f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
-
     await message.answer(text[:3900])
 
 
@@ -953,17 +993,14 @@ async def payments_handler(message: Message):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT telegram_id, plan, months, amount, currency, created_at
-            FROM payments
-            ORDER BY created_at DESC
-            LIMIT 15
+            FROM payments ORDER BY created_at DESC LIMIT 15
         """)
 
     if not rows:
         await message.answer("Платежей пока нет.")
         return
 
-    text = "💳 Последние платежи\n\n"
-
+    text = "💳 Последние платежи Telegram Stars\n\n"
     for row in rows:
         text += (
             f"ID: {row['telegram_id']}\n"
@@ -971,7 +1008,6 @@ async def payments_handler(message: Message):
             f"Сумма: {row['amount']} {row['currency']}\n"
             f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
-
     await message.answer(text[:3900])
 
 
@@ -980,7 +1016,6 @@ async def admin_set_plan(message: Message, plan: str):
         return
 
     parts = message.text.split()
-
     if len(parts) != 2 or not parts[1].isdigit():
         await message.answer("Формат команды: /setpro telegram_id")
         return
@@ -989,11 +1024,7 @@ async def admin_set_plan(message: Message, plan: str):
     until = add_months_rough(1) if plan != "FREE" else None
 
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE users
-            SET plan=$2, plan_until=$3
-            WHERE telegram_id=$1
-        """, telegram_id, plan, until)
+        await conn.execute("UPDATE users SET plan=$2, plan_until=$3 WHERE telegram_id=$1", telegram_id, plan, until)
 
     await log_event(telegram_id, "admin_set_plan", plan)
     await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}.")
@@ -1025,42 +1056,83 @@ async def chat_handler(message: Message):
         return
 
     user = await get_or_create_user(message)
-
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
-        await message.answer(
-            f"🛡 Слишком много сообщений подряд.\n\n"
-            f"Попробуйте снова через {wait_seconds} сек."
-        )
+        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
         return
 
     allowed, reason = await check_limit(user)
-
     if not allowed:
         await log_event(message.from_user.id, "limit_reached", reason)
-
-        await message.answer(
-            "⏳ Лимит сообщений закончился.\n\n"
-            "Вы можете перейти на PLUS, PRO или VIP.",
-            reply_markup=tariffs_menu(),
-        )
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
         return
+
+    selected_model = user["selected_model"]
+
+    if selected_model in {"nanobanana", "gptimage"}:
+        wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🌀 Генерирую изображение..."
+        wait_message = await message.answer(wait_text)
+        try:
+            await save_message(message.from_user.id, "user", message.text)
+
+            if selected_model == "nanobanana":
+                image_bytes, text_note = await generate_nano_banana_image(message.text)
+            else:
+                image_bytes, text_note = await generate_gpt_image(message.text)
+
+            if not image_bytes:
+                await wait_message.edit_text(
+                    text_note or "⚠️ Генерация не вернула изображение. Попробуйте другой запрос.",
+                    reply_markup=main_menu(),
+                )
+                return
+
+            filename = "nano_banana.png" if selected_model == "nanobanana" else "sora_gpt_image.png"
+            photo = BufferedInputFile(image_bytes, filename=filename)
+            await wait_message.delete()
+            await message.answer_photo(
+                photo=photo,
+                caption=(text_note[:900] if text_note else "✅ Готово"),
+            )
+
+            await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
+            await increase_usage(message.from_user.id)
+            await log_event(message.from_user.id, "ai_image", selected_model)
+            return
+
+        except Exception as e:
+            admin_error = short_error_text(e)
+            print(f"IMAGE ERROR SHORT:\n{admin_error}")
+            print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
+            await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
+            try:
+                await wait_message.edit_text(
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
+                    "Попробуйте позже или выберите другую нейросеть.",
+                    reply_markup=main_menu(),
+                )
+            except Exception:
+                await message.answer(
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
+                    "Попробуйте позже или выберите другую нейросеть.",
+                    reply_markup=main_menu(),
+                )
+            return
 
     wait_message = await message.answer("Печатает ответ...")
 
     try:
         await save_message(message.from_user.id, "user", message.text)
-
         history = await get_chat_history(message.from_user.id)
-        answer = await ai_router(user["selected_model"], history)
+        answer = await ai_router(selected_model, history)
 
         if not answer:
             answer = "⚠️ AI вернул пустой ответ. Попробуйте переформулировать вопрос."
 
         await save_message(message.from_user.id, "assistant", answer)
         await increase_usage(message.from_user.id)
-        await log_event(message.from_user.id, "ai_message", user["selected_model"])
+        await log_event(message.from_user.id, "ai_message", selected_model)
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -1069,20 +1141,24 @@ async def chat_handler(message: Message):
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
-    except Exception:
-        error_text = traceback.format_exc()
-        print(f"AI ERROR:\n{error_text}")
-        await send_ai_error_to_admin(error_text)
+    except Exception as e:
+        admin_error = short_error_text(e)
+        print(f"AI ERROR SHORT:\n{admin_error}")
+        print(f"AI ERROR TRACE:\n{traceback.format_exc()}")
+
+        await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
 
         try:
             await wait_message.edit_text(
-                "⚠️ Сейчас у AI временные технические работы.\n\n"
-                "Попробуйте ещё раз через минуту."
+                "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
+                "Попробуйте позже или выберите другую нейросеть.",
+                reply_markup=main_menu(),
             )
         except Exception:
             await message.answer(
-                "⚠️ Сейчас у AI временные технические работы.\n\n"
-                "Попробуйте ещё раз через минуту."
+                "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
+                "Попробуйте позже или выберите другую нейросеть.",
+                reply_markup=main_menu(),
             )
 
 
@@ -1097,7 +1173,6 @@ async def main():
         raise RuntimeError("DATABASE_URL is missing")
 
     await bot.delete_webhook(drop_pending_updates=True)
-
     await init_db()
     await setup_bot_info()
 
