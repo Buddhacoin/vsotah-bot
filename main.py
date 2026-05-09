@@ -343,8 +343,8 @@ async def setup_bot_info():
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
     try:
-        await bot.set_my_description("ChatGPT, Claude, Gemini и другие.
-Support: @LightningNewsSupport")
+        await bot.set_my_description("""ChatGPT, Claude, Gemini и другие.
+Support: @LightningNewsSupport""")
         await bot.set_my_short_description("ChatGPT, Claude, Gemini и генерация изображений")
     except Exception as e:
         print(f"BOT DESCRIPTION ERROR: {e}")
@@ -512,38 +512,24 @@ async def user_profile_text(user):
         usage_block = f"Запросов в неделю: {user['weekly_used']}/{PLAN_WEEKLY_LIMITS[plan]}"
     else:
         usage_block = (
-            f"Запросов сегодня: {user['daily_used']}/{FREE_DAILY_LIMIT}
-"
+            f"Запросов сегодня: {user['daily_used']}/{FREE_DAILY_LIMIT}\n"
             f"Запросов в неделю: {user['weekly_used']}/{FREE_WEEKLY_LIMIT}"
         )
 
     text = (
-        f"📊 Статистика использования
-
-"
-        f"{usage_block}
-
-"
-        f"Подписка: {plan}
-"
-        f"Выбрана модель: {current_model}
-
-"
+        f"📊 Статистика использования\n\n"
+        f"{usage_block}\n\n"
+        f"Подписка: {plan}\n"
+        f"Выбрана модель: {current_model}\n\n"
     )
 
     if plan != "FREE" and user["plan_until"]:
-        text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}
-
-"
+        text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
 
     text += (
-        "Нужно больше? 🚀 Выберите тариф для покупки Premium:
-
-"
-        "⭐ PLUS — 500 запросов в неделю
-"
-        "💎 PRO — 1400 запросов в неделю
-"
+        "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
+        "⭐ PLUS — 500 запросов в неделю\n"
+        "💎 PRO — 1400 запросов в неделю\n"
         "👑 VIP — безлимит"
     )
     return text
@@ -572,8 +558,7 @@ def messages_to_plain_text(messages: list[dict]) -> str:
         content = msg.get("content", "")
         if content:
             lines.append(f"{role}: {content}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 async def ai_router(selected_model: str, messages: list[dict]):
@@ -601,17 +586,13 @@ async def ai_router(selected_model: str, messages: list[dict]):
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 parts.append(block.text)
-        return "
-".join(parts).strip()
+        return "\n".join(parts).strip()
 
     if selected_model == "gemini":
         if not google_client:
             return "⚠️ Gemini пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
 
-        prompt = f"{system_text}
-
-История диалога:
-{messages_to_plain_text(messages)}"
+        prompt = f"{system_text}\n\nИстория диалога:\n{messages_to_plain_text(messages)}"
 
         def run_gemini():
             response = google_client.models.generate_content(
@@ -692,8 +673,7 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
 
 
 def short_error_text(error: Exception) -> str:
-    return str(error).replace("
-", " ")[:1200]
+    return str(error).replace("\n", " ")[:1200]
 
 
 async def send_ai_error_to_admin(error_text: str):
@@ -732,9 +712,7 @@ async def start_handler(message: Message):
     user = await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
     await message.answer(
-        f"{welcome_text()}
-
-Текущая нейросеть: {model_display_name(user['selected_model'])}",
+        f"{welcome_text()}\n\nТекущая нейросеть: {model_display_name(user['selected_model'])}",
         reply_markup=main_menu(),
         parse_mode="HTML",
         link_preview_options=no_preview(),
@@ -817,11 +795,7 @@ async def tariff_callback(callback: CallbackQuery):
     tariff = TARIFFS[plan]
     await safe_edit_or_send(
         callback,
-        f"🚀 {tariff['title']}
-
-{tariff['description']}
-
-Выберите период подписки:",
+        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nВыберите период подписки:",
         reply_markup=period_menu(plan),
     )
 
@@ -837,11 +811,7 @@ async def period_callback(callback: CallbackQuery):
     await log_event(callback.from_user.id, "period_select", f"{plan} {months}")
     await safe_edit_or_send(
         callback,
-        f"💳 Выберите способ оплаты:
-
-Тариф: {plan}
-Период: {months} мес.
-Цена в Stars: ⭐ {price}",
+        f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена в Stars: ⭐ {price}",
         reply_markup=payment_method_menu(plan, months),
     )
 
@@ -911,9 +881,7 @@ async def successful_payment_handler(message: Message):
         )
 
     await activate_plan(message.from_user.id, plan, months)
-    await message.answer(f"✅ Оплата прошла успешно!
-
-Тариф {plan} активирован на {months} мес.", reply_markup=main_menu())
+    await message.answer(f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.", reply_markup=main_menu())
 
 
 @dp.callback_query(F.data.startswith("set_model_"))
@@ -938,11 +906,7 @@ async def set_model_callback(callback: CallbackQuery):
 
     await bot.send_message(
         chat_id=callback.message.chat.id,
-        text=f"✅ Нейросеть выбрана:
-
-{model_display_name(model)}
-
-Напишите запрос или выберите действие ниже.",
+        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос или выберите действие ниже.",
         reply_markup=main_menu(),
     )
 
@@ -952,21 +916,13 @@ async def admin_handler(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer(
-        "🛠 Админ-панель
-
-"
-        "/stats — общая статистика
-"
-        "/users — последние пользователи
-"
-        "/payments — платежи
-"
-        "/setplus telegram_id
-"
-        "/setpro telegram_id
-"
-        "/setvip telegram_id
-"
+        "🛠 Админ-панель\n\n"
+        "/stats — общая статистика\n"
+        "/users — последние пользователи\n"
+        "/payments — платежи\n"
+        "/setplus telegram_id\n"
+        "/setpro telegram_id\n"
+        "/setvip telegram_id\n"
         "/setfree telegram_id"
     )
 
@@ -990,32 +946,17 @@ async def stats_handler(message: Message):
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
 
     await message.answer(
-        "📊 Статистика бота
-
-"
-        f"Пользователей всего: {total_users}
-"
-        f"Новых сегодня: {today_users}
-"
-        f"Стартов сегодня: {starts_today}
-
-"
-        f"Сообщений всего: {total_messages}
-"
-        f"Сообщений сегодня: {today_messages}
-
-"
-        f"PLUS: {plus_users}
-"
-        f"PRO: {pro_users}
-"
-        f"VIP: {vip_users}
-
-"
-        f"Открытий премиума: {premium_clicks}
-"
-        f"Открытий оплаты Stars: {invoices}
-"
+        "📊 Статистика бота\n\n"
+        f"Пользователей всего: {total_users}\n"
+        f"Новых сегодня: {today_users}\n"
+        f"Стартов сегодня: {starts_today}\n\n"
+        f"Сообщений всего: {total_messages}\n"
+        f"Сообщений сегодня: {today_messages}\n\n"
+        f"PLUS: {plus_users}\n"
+        f"PRO: {pro_users}\n"
+        f"VIP: {vip_users}\n\n"
+        f"Открытий премиума: {premium_clicks}\n"
+        f"Открытий оплаты Stars: {invoices}\n"
         f"Stars получено: {total_stars}"
     )
 
@@ -1031,23 +972,15 @@ async def users_handler(message: Message):
             FROM users ORDER BY created_at DESC LIMIT 15
         """)
 
-    text = "👥 Последние пользователи
-
-"
+    text = "👥 Последние пользователи\n\n"
     for row in rows:
         name = row["username"] or row["first_name"] or "без имени"
         text += (
-            f"ID: {row['telegram_id']}
-"
-            f"Имя: {name}
-"
-            f"Тариф: {row['plan']}
-"
-            f"Запросов за неделю: {row['weekly_used']}
-"
-            f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}
-
-"
+            f"ID: {row['telegram_id']}\n"
+            f"Имя: {name}\n"
+            f"Тариф: {row['plan']}\n"
+            f"Запросов за неделю: {row['weekly_used']}\n"
+            f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
     await message.answer(text[:3900])
 
@@ -1067,20 +1000,13 @@ async def payments_handler(message: Message):
         await message.answer("Платежей пока нет.")
         return
 
-    text = "💳 Последние платежи Telegram Stars
-
-"
+    text = "💳 Последние платежи Telegram Stars\n\n"
     for row in rows:
         text += (
-            f"ID: {row['telegram_id']}
-"
-            f"Тариф: {row['plan']} на {row['months']} мес.
-"
-            f"Сумма: {row['amount']} {row['currency']}
-"
-            f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}
-
-"
+            f"ID: {row['telegram_id']}\n"
+            f"Тариф: {row['plan']} на {row['months']} мес.\n"
+            f"Сумма: {row['amount']} {row['currency']}\n"
+            f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
     await message.answer(text[:3900])
 
@@ -1133,17 +1059,13 @@ async def chat_handler(message: Message):
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
-        await message.answer(f"🛡 Слишком много сообщений подряд.
-
-Попробуйте снова через {wait_seconds} сек.")
+        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
         return
 
     allowed, reason = await check_limit(user)
     if not allowed:
         await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.
-
-Вы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
         return
 
     selected_model = user["selected_model"]
@@ -1181,24 +1103,18 @@ async def chat_handler(message: Message):
 
         except Exception as e:
             admin_error = short_error_text(e)
-            print(f"IMAGE ERROR SHORT:
-{admin_error}")
-            print(f"IMAGE ERROR TRACE:
-{traceback.format_exc()}")
+            print(f"IMAGE ERROR SHORT:\n{admin_error}")
+            print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
             await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
             try:
                 await wait_message.edit_text(
-                    "⚠️ Генерация изображений временно недоступна.
-
-"
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
                     "Попробуйте позже или выберите другую нейросеть.",
                     reply_markup=main_menu(),
                 )
             except Exception:
                 await message.answer(
-                    "⚠️ Генерация изображений временно недоступна.
-
-"
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
                     "Попробуйте позже или выберите другую нейросеть.",
                     reply_markup=main_menu(),
                 )
@@ -1227,26 +1143,20 @@ async def chat_handler(message: Message):
 
     except Exception as e:
         admin_error = short_error_text(e)
-        print(f"AI ERROR SHORT:
-{admin_error}")
-        print(f"AI ERROR TRACE:
-{traceback.format_exc()}")
+        print(f"AI ERROR SHORT:\n{admin_error}")
+        print(f"AI ERROR TRACE:\n{traceback.format_exc()}")
 
         await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
 
         try:
             await wait_message.edit_text(
-                "⚠️ Сейчас выбранная нейросеть временно недоступна.
-
-"
+                "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
                 "Попробуйте позже или выберите другую нейросеть.",
                 reply_markup=main_menu(),
             )
         except Exception:
             await message.answer(
-                "⚠️ Сейчас выбранная нейросеть временно недоступна.
-
-"
+                "⚠️ Сейчас выбранная нейросеть временно недоступна.\n\n"
                 "Попробуйте позже или выберите другую нейросеть.",
                 reply_markup=main_menu(),
             )
@@ -1274,3 +1184,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
