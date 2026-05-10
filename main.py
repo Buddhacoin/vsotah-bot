@@ -34,14 +34,21 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", OPENAI_TEXT_MODEL)
-ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-5")
-ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", ANTHROPIC_TEXT_MODEL)
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini")
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
+ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", GEMINI_TEXT_MODEL)
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
+
+# Speed settings. You can override these in Railway Variables if needed.
+TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "6"))
+VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
+TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
+VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
+AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -447,7 +454,7 @@ async def save_message(telegram_id, role, content):
         )
 
 
-async def get_chat_history(telegram_id, limit=10):
+async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
@@ -570,8 +577,8 @@ async def ai_router(selected_model: str, messages: list[dict]):
 
         response = await anthropic_client.messages.create(
             model=ANTHROPIC_TEXT_MODEL,
-            max_tokens=2500,
-            temperature=0.7,
+            max_tokens=TEXT_MAX_TOKENS,
+            temperature=0.5,
             system=system_text,
             messages=normalize_anthropic_messages(messages),
         )
@@ -601,15 +608,19 @@ async def ai_router(selected_model: str, messages: list[dict]):
         response = await deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=full_messages,
-            temperature=0.7,
+            temperature=0.5,
         )
         return response.choices[0].message.content
 
     full_messages = [{"role": "system", "content": system_text}, *messages]
-    response = await client.chat.completions.create(
-        model=OPENAI_TEXT_MODEL,
-        messages=full_messages,
-        temperature=0.7,
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=OPENAI_TEXT_MODEL,
+            messages=full_messages,
+            temperature=0.5,
+            max_tokens=TEXT_MAX_TOKENS,
+        ),
+        timeout=AI_TIMEOUT_SECONDS,
     )
     return response.choices[0].message.content
 
@@ -625,11 +636,11 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
 
         response = await anthropic_client.messages.create(
             model=ANTHROPIC_VISION_MODEL,
-            max_tokens=2500,
-            temperature=0.7,
+            max_tokens=VISION_MAX_TOKENS,
+            temperature=0.5,
             system=system_text,
             messages=[
-                *normalize_anthropic_messages(history[-6:]),
+                *normalize_anthropic_messages(history[-VISION_HISTORY_LIMIT:]),
                 {
                     "role": "user",
                     "content": [
@@ -658,7 +669,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
 
         prompt = (
             f"{system_text}\n\n"
-            f"Краткая история диалога:\n{messages_to_plain_text(history[-6:])}\n\n"
+            f"Краткая история диалога:\n{messages_to_plain_text(history[-VISION_HISTORY_LIMIT:])}\n\n"
             f"Вопрос пользователя к изображению: {question}"
         )
 
@@ -681,7 +692,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
         )
 
     openai_messages = [{"role": "system", "content": system_text}]
-    for msg in history[-6:]:
+    for msg in history[-VISION_HISTORY_LIMIT:]:
         if msg.get("role") in {"user", "assistant"} and msg.get("content"):
             openai_messages.append({"role": msg["role"], "content": msg["content"]})
 
@@ -694,17 +705,21 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:image/jpeg;base64,{image_b64}",
-                        "detail": "auto",
+                        "detail": "low",
                     },
                 },
             ],
         }
     )
 
-    response = await client.chat.completions.create(
-        model=OPENAI_VISION_MODEL,
-        messages=openai_messages,
-        temperature=0.7,
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=OPENAI_VISION_MODEL,
+            messages=openai_messages,
+            temperature=0.4,
+            max_tokens=VISION_MAX_TOKENS,
+        ),
+        timeout=AI_TIMEOUT_SECONDS,
     )
     return response.choices[0].message.content
 
