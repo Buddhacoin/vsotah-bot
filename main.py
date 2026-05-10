@@ -784,14 +784,99 @@ async def download_telegram_photo(message: Message) -> bytes:
     return buffer.getvalue()
 
 
+
+
+async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> str:
+    """Translate and strengthen image prompts before sending them to image models."""
+    original = (user_prompt or "").strip()
+    if not original:
+        original = "Create a high quality detailed image."
+
+    system = (
+        "You are a professional prompt engineer for AI image generation. "
+        "Translate the user's request to clear English and make it specific for image generation. "
+        "Preserve the user's main subject EXACTLY. If the user asks for an elephant, the image MUST contain an elephant, not a cat or another animal. "
+        "Do not add random text, signs, logos, watermarks, captions, or fake letters unless the user explicitly asks for text. "
+        "Keep the prompt concise but vivid: subject, scene, composition, lighting, style, quality. "
+        "Return ONLY the final English image prompt, without explanations."
+    )
+
+    user = (
+        f"Image model: {image_model}\n"
+        f"User request: {original}\n\n"
+        "Make a reliable English prompt. The generated image must follow the user request literally."
+    )
+
+    try:
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=OPENAI_TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_completion_tokens=500,
+            ),
+            timeout=15,
+        )
+        improved = (response.choices[0].message.content or "").strip()
+        if improved:
+            return improved[:2500]
+    except Exception as e:
+        print(f"IMAGE PROMPT ENHANCE ERROR: {short_error_text(e)}")
+
+    return (
+        f"Create a high quality, detailed image that follows this request exactly: {original}. "
+        "Do not add random text, captions, watermarks, logos, or fake letters unless explicitly requested."
+    )[:2500]
+
+
+async def enhance_image_edit_prompt(user_prompt: str) -> str:
+    """Translate and strengthen image edit prompts before sending them to image editing."""
+    original = (user_prompt or "").strip() or "Improve this image while keeping the same subject."
+
+    system = (
+        "You are a professional prompt engineer for AI image editing. "
+        "Translate the user's request to clear English. "
+        "The edit must preserve the original subject, face, identity, pose, and important details unless the user explicitly asks to change them. "
+        "Do not add random text, signs, watermarks, logos, or fake letters. "
+        "Return ONLY the final English edit instruction, without explanations."
+    )
+
+    try:
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=OPENAI_TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": original},
+                ],
+                max_completion_tokens=400,
+            ),
+            timeout=15,
+        )
+        improved = (response.choices[0].message.content or "").strip()
+        if improved:
+            return improved[:2000]
+    except Exception as e:
+        print(f"IMAGE EDIT PROMPT ENHANCE ERROR: {short_error_text(e)}")
+
+    return (
+        f"Edit this image according to the request: {original}. "
+        "Preserve the original subject and identity. Do not add random text or watermarks."
+    )[:2000]
+
+
 async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
     if not google_client:
         return None, "⚠️ Nano Banana пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
 
+    enhanced_prompt = await enhance_image_prompt(prompt, "Nano Banana / Gemini Image")
+
     def run_image_generation():
         response = google_client.models.generate_images(
             model=NANO_BANANA_MODEL,
-            prompt=prompt,
+            prompt=enhanced_prompt,
             config=types.GenerateImagesConfig(
                 number_of_images=1,
                 aspect_ratio="1:1",
@@ -820,9 +905,11 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
             value = value.split(",", 1)[1]
         return base64.b64decode(value)
 
+    enhanced_prompt = await enhance_image_prompt(prompt, "Sora GPT Image / OpenAI Image")
+
     response = await client.images.generate(
         model=GPT_IMAGE_MODEL,
-        prompt=prompt,
+        prompt=enhanced_prompt,
         size="1024x1024",
         quality=GPT_IMAGE_QUALITY,
         n=1,
@@ -841,6 +928,8 @@ async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None,
             value = value.split(",", 1)[1]
         return base64.b64decode(value)
 
+    enhanced_prompt = await enhance_image_edit_prompt(prompt)
+
     image_file = BytesIO(image_bytes)
     image_file.name = "input.png"
 
@@ -850,7 +939,7 @@ async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None,
     response = await client.images.edit(
         model=GPT_IMAGE_MODEL,
         image=image_file,
-        prompt=prompt,
+        prompt=enhanced_prompt,
         size="1024x1024",
         n=1,
     )
