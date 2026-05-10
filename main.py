@@ -844,12 +844,14 @@ async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None,
     image_file = BytesIO(image_bytes)
     image_file.name = "input.png"
 
+    # В текущей версии OpenAI Images API метод edit не принимает quality.
+    # quality оставляем только для generate, иначе будет ошибка:
+    # AsyncImages.edit() got an unexpected keyword argument 'quality'
     response = await client.images.edit(
         model=GPT_IMAGE_MODEL,
         image=image_file,
         prompt=prompt,
         size="1024x1024",
-        quality=GPT_IMAGE_QUALITY,
         n=1,
     )
 
@@ -885,23 +887,51 @@ def extract_document_text(filename: str, file_bytes: bytes) -> str:
         return file_bytes.decode("utf-8", errors="replace")[:FILE_TEXT_LIMIT]
 
     if ext == "pdf":
-        try:
-            try:
-                from pypdf import PdfReader
-            except Exception:
-                from PyPDF2 import PdfReader
+        pages: list[str] = []
 
+        # 1) pypdf — быстрый вариант для PDF с текстовым слоем
+        try:
+            from pypdf import PdfReader
             reader = PdfReader(BytesIO(file_bytes))
-            pages = []
             for page in reader.pages[:25]:
                 text = page.extract_text() or ""
                 if text.strip():
                     pages.append(text.strip())
                 if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
                     break
-            return "\n\n".join(pages)[:FILE_TEXT_LIMIT]
         except Exception as e:
-            raise ValueError(f"PDF_READ_ERROR: {e}")
+            print(f"PDF PYPDF READ ERROR: {e}")
+
+        # 2) pdfplumber — иногда лучше читает таблицы/чеки
+        if not "\n".join(pages).strip():
+            try:
+                import pdfplumber
+                with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                    for page in pdf.pages[:25]:
+                        text = page.extract_text() or ""
+                        if text.strip():
+                            pages.append(text.strip())
+                        if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
+                            break
+            except Exception as e:
+                print(f"PDF PDFPLUMBER READ ERROR: {e}")
+
+        # 3) PyMuPDF — ещё один fallback для текстового слоя
+        if not "\n".join(pages).strip():
+            try:
+                import fitz
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                for page in doc[:25]:
+                    text = page.get_text("text") or ""
+                    if text.strip():
+                        pages.append(text.strip())
+                    if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
+                        break
+                doc.close()
+            except Exception as e:
+                print(f"PDF FITZ TEXT READ ERROR: {e}")
+
+        return "\n\n".join(pages)[:FILE_TEXT_LIMIT]
 
     if ext == "docx":
         try:
@@ -930,6 +960,79 @@ def extract_document_text(filename: str, file_bytes: bytes) -> str:
             raise ValueError(f"XLSX_READ_ERROR: {e}")
 
     raise ValueError("UNSUPPORTED_FILE_TYPE")
+
+
+
+
+def render_pdf_pages_to_images(file_bytes: bytes, max_pages: int = 3) -> list[bytes]:
+    """Рендерит первые страницы PDF в JPG для анализа сканов/чеков через Vision."""
+    try:
+        import fitz
+    except Exception:
+        return []
+
+    images: list[bytes] = []
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page_index in range(min(len(doc), max_pages)):
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            images.append(pix.tobytes("jpeg"))
+        doc.close()
+    except Exception as e:
+        print(f"PDF RENDER ERROR: {e}")
+        return []
+
+    return images
+
+
+async def analyze_pdf_images_with_openai(question: str, filename: str, file_bytes: bytes, history: list[dict]) -> str:
+    """Fallback для PDF без извлекаемого текста: сканы, чеки, регистрации, картинки внутри PDF."""
+    page_images = await asyncio.to_thread(render_pdf_pages_to_images, file_bytes, 3)
+    if not page_images:
+        return ""
+
+    question = question.strip() or "Проанализируй PDF, прочитай видимый текст и выдели главное."
+    content = [
+        {
+            "type": "text",
+            "text": (
+                f"Пользователь отправил PDF-файл: {filename}.\n"
+                f"PDF не содержит обычного текстового слоя или плохо читается как текст, поэтому ниже страницы как изображения.\n\n"
+                f"Задача пользователя: {question}\n\n"
+                "Прочитай всё, что видно на страницах, и ответь по делу."
+            ),
+        }
+    ]
+
+    for img in page_images:
+        image_b64 = base64.b64encode(img).decode("utf-8")
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_b64}",
+                    "detail": "low",
+                },
+            }
+        )
+
+    openai_messages = [{"role": "system", "content": system_prompt()}]
+    for msg in history[-VISION_HISTORY_LIMIT:]:
+        if msg.get("role") in {"user", "assistant"} and msg.get("content"):
+            openai_messages.append({"role": msg["role"], "content": msg["content"]})
+    openai_messages.append({"role": "user", "content": content})
+
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=OPENAI_VISION_MODEL,
+            messages=openai_messages,
+            temperature=0.4,
+            max_completion_tokens=VISION_MAX_TOKENS,
+        ),
+        timeout=AI_TIMEOUT_SECONDS,
+    )
+    return response.choices[0].message.content or ""
 
 
 async def file_router(selected_model: str, question: str, filename: str, extracted_text: str, history: list[dict]):
@@ -1416,7 +1519,6 @@ async def photo_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"VISION ERROR SHORT:\n{admin_error}")
         print(f"VISION ERROR TRACE:\n{traceback.format_exc()}")
-        await send_ai_error_to_admin(f"⚠️ VISION ERROR | {selected_model} | {admin_error}")
 
         try:
             await wait_message.edit_text(
@@ -1484,17 +1586,28 @@ async def document_handler(message: Message):
                 )
             return
 
-        if not extracted_text.strip():
-            await wait_message.edit_text(
-                "⚠️ Не удалось извлечь текст из файла. Возможно, это скан или защищённый документ.",
-                reply_markup=main_menu(),
-            )
-            return
-
-        await wait_message.edit_text("🧠 Анализирую файл...")
         await save_message(message.from_user.id, "user", f"[Файл {filename}] {question}")
         history = await get_chat_history(message.from_user.id)
-        answer = await file_router(selected_model, question, filename, extracted_text, history)
+
+        if not extracted_text.strip():
+            if filename.lower().endswith(".pdf"):
+                await wait_message.edit_text("📄 PDF похож на скан. Анализирую страницы как изображения...")
+                answer = await analyze_pdf_images_with_openai(question, filename, file_bytes, history)
+                if not answer:
+                    await wait_message.edit_text(
+                        "⚠️ Не удалось извлечь текст из PDF. Возможно, файл защищён или страницы плохо читаются.",
+                        reply_markup=main_menu(),
+                    )
+                    return
+            else:
+                await wait_message.edit_text(
+                    "⚠️ Не удалось извлечь текст из файла. Возможно, это скан или защищённый документ.",
+                    reply_markup=main_menu(),
+                )
+                return
+        else:
+            await wait_message.edit_text("🧠 Анализирую файл...")
+            answer = await file_router(selected_model, question, filename, extracted_text, history)
 
         if not answer:
             answer = "⚠️ AI вернул пустой ответ. Попробуйте задать вопрос по файлу точнее."
@@ -1514,7 +1627,6 @@ async def document_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"FILE ERROR SHORT:\n{admin_error}")
         print(f"FILE ERROR TRACE:\n{traceback.format_exc()}")
-        await send_ai_error_to_admin(f"⚠️ FILE ERROR | {selected_model} | {admin_error}")
 
         try:
             await wait_message.edit_text(
