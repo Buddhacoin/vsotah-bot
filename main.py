@@ -126,11 +126,11 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🌀 ChatGPT", callback_data="set_model_gpt")],
-            [InlineKeyboardButton(text="✴️ Claude", callback_data="set_model_claude")],
-            [InlineKeyboardButton(text="✦ Gemini", callback_data="set_model_gemini")],
-            [InlineKeyboardButton(text="🍌 Nano Banana", callback_data="set_model_nanobanana")],
-            [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
+            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini 🟢 FREE", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash 🟢 FREE", callback_data="set_model_gemini")],
+            [InlineKeyboardButton(text="✴️ Claude — Sonnet ⭐ PLUS", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="🍌 Nano Banana Pro 💎 PRO", callback_data="set_model_nanobanana")],
+            [InlineKeyboardButton(text="🌀 Sora GPT Image 👑 VIP", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -193,15 +193,51 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+PLAN_LEVELS = {
+    "FREE": 0,
+    "PLUS": 1,
+    "PRO": 2,
+    "VIP": 3,
+}
+
+MODEL_REQUIRED_PLAN = {
+    "gpt": "FREE",
+    "gemini": "FREE",
+    "claude": "PLUS",
+    "nanobanana": "PRO",
+    "gptimage": "VIP",
+}
+
+
+def plan_level(plan: str | None) -> int:
+    return PLAN_LEVELS.get((plan or "FREE").upper(), 0)
+
+
+def model_required_plan(model: str) -> str:
+    return MODEL_REQUIRED_PLAN.get(model, "FREE")
+
+
+def has_model_access(user_plan: str | None, model: str) -> bool:
+    return plan_level(user_plan) >= plan_level(model_required_plan(model))
+
+
 def model_display_name(model: str) -> str:
     names = {
-        "gpt": "🌀 ChatGPT",
-        "claude": "✴️ Claude",
-        "gemini": "✦ Gemini",
-        "nanobanana": "🍌 Nano Banana",
-        "gptimage": "🌀 Sora GPT Image",
+        "gpt": "🌀 ChatGPT — GPT-4o mini 🟢 FREE",
+        "gemini": "✦ Gemini — 2.5 Flash 🟢 FREE",
+        "claude": "✴️ Claude — Sonnet ⭐ PLUS",
+        "nanobanana": "🍌 Nano Banana Pro 💎 PRO",
+        "gptimage": "🌀 Sora GPT Image 👑 VIP",
     }
-    return names.get(model, "🌀 ChatGPT")
+    return names.get(model, "🌀 ChatGPT — GPT-4o mini 🟢 FREE")
+
+
+def premium_required_text(model: str) -> str:
+    required = model_required_plan(model)
+    return (
+        f"🔒 {model_display_name(model)} доступна с тарифа {required}.\n\n"
+        "Выберите подходящий тариф, чтобы открыть более мощные нейросети."
+    )
 
 
 def welcome_text():
@@ -233,9 +269,22 @@ def welcome_text():
 def premium_text():
     return """💳 Купить подписку
 
+🟢 FREE
+• ChatGPT — GPT-4o mini
+• Gemini — 2.5 Flash
+• 15 запросов в день / 105 в неделю
+
 ⭐ PLUS — 500 запросов в неделю
+• Claude Sonnet
+• больше лимитов
+
 💎 PRO — 1400 запросов в неделю
-👑 VIP — безлимит"""
+• Nano Banana Pro
+• генерация изображений
+
+👑 VIP — безлимит
+• Sora GPT Image
+• максимум возможностей"""
 
 
 def channels_text():
@@ -499,7 +548,7 @@ async def user_profile_text(user):
     }
 
     plan = user["plan"] or "FREE"
-    current_model = model_names.get(user["selected_model"], "ChatGPT")
+    current_model = model_display_name(user["selected_model"])
 
     if plan == "VIP":
         usage_block = "Запросов: ♾ безлимит"
@@ -523,9 +572,9 @@ async def user_profile_text(user):
 
     text += (
         "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
-        "⭐ PLUS — 500 запросов в неделю\n"
-        "💎 PRO — 1400 запросов в неделю\n"
-        "👑 VIP — безлимит"
+        "⭐ PLUS — Claude Sonnet и 500 запросов в неделю\n"
+        "💎 PRO — Nano Banana Pro и 1400 запросов в неделю\n"
+        "👑 VIP — Sora GPT Image и безлимит"
     )
     return text
 
@@ -846,7 +895,12 @@ async def premium_command(message: Message):
 @dp.message(Command("models"))
 async def models_command(message: Message):
     await log_event(message.from_user.id, "models_command")
-    await message.answer("🤖 Выберите нейросеть:", reply_markup=models_menu())
+    await message.answer(
+        "🤖 Выберите нейросеть:\n\n"
+        "🟢 FREE доступно всем\n"
+        "⭐ PLUS / 💎 PRO / 👑 VIP открываются после подписки",
+        reply_markup=models_menu(),
+    )
 
 
 @dp.message(Command("channels"))
@@ -893,7 +947,13 @@ async def premium_callback(callback: CallbackQuery):
 async def models_callback(callback: CallbackQuery):
     await callback.answer()
     await log_event(callback.from_user.id, "models_open")
-    await safe_edit_or_send(callback, "🤖 Выберите нейросеть:", reply_markup=models_menu())
+    await safe_edit_or_send(
+        callback,
+        "🤖 Выберите нейросеть:\n\n"
+        "🟢 FREE доступно всем\n"
+        "⭐ PLUS / 💎 PRO / 👑 VIP открываются после подписки",
+        reply_markup=models_menu(),
+    )
 
 
 @dp.callback_query(F.data.startswith("tariff_"))
@@ -1008,6 +1068,11 @@ async def set_model_callback(callback: CallbackQuery):
 
     if model not in allowed_models:
         await safe_edit_or_send(callback, "⚠️ Эта модель сейчас недоступна.", reply_markup=models_menu())
+        return
+
+    user = await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    if not has_model_access(user["plan"], model):
+        await safe_edit_or_send(callback, premium_required_text(model), reply_markup=tariffs_menu())
         return
 
     async with db_pool.acquire() as conn:
@@ -1184,6 +1249,14 @@ async def photo_handler(message: Message):
         return
 
     selected_model = user["selected_model"]
+    if not has_model_access(user["plan"], selected_model):
+        selected_model = "gpt"
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
+        await message.answer(
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
+        )
+
     wait_message = await message.answer("📷 Анализирую фото...")
 
     try:
@@ -1247,6 +1320,13 @@ async def chat_handler(message: Message):
         return
 
     selected_model = user["selected_model"]
+    if not has_model_access(user["plan"], selected_model):
+        selected_model = "gpt"
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
+        await message.answer(
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
+        )
 
     if selected_model in {"nanobanana", "gptimage"}:
         wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🌀 Генерирую изображение..."
