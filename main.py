@@ -1,8 +1,6 @@
 import asyncio
 import base64
-import json
 import os
-import secrets
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -35,15 +33,17 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-TRIBUTE_API_KEY = os.getenv("TRIBUTE_API_KEY")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://gptclaude-bot-production.up.railway.app").rstrip("/")
-PORT = int(os.getenv("PORT", "8080"))
 
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", OPENAI_TEXT_MODEL)
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-5")
+ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", ANTHROPIC_TEXT_MODEL)
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", GEMINI_TEXT_MODEL)
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
+
+PORT = int(os.getenv("PORT", "8080"))
 
 ADMIN_IDS = {
     int(x.strip())
@@ -76,27 +76,6 @@ TARIFFS = {
         "title": "VIP",
         "description": "Безлимит",
         "prices": {1: 1499, 3: 3000, 6: 6000, 12: 9900},
-    },
-}
-
-TRIBUTE_LINKS = {
-    "PLUS": {
-        1: "https://web.tribute.tg/p/vJ9",
-        3: "https://web.tribute.tg/p/vJc",
-        6: "https://web.tribute.tg/p/vJd",
-        12: "https://web.tribute.tg/p/vJe",
-    },
-    "PRO": {
-        1: "https://web.tribute.tg/p/vJg",
-        3: "https://web.tribute.tg/p/vJh",
-        6: "https://web.tribute.tg/p/vJi",
-        12: "https://web.tribute.tg/p/vJj",
-    },
-    "VIP": {
-        1: "https://web.tribute.tg/p/vJk",
-        3: "https://web.tribute.tg/p/vJl",
-        6: "https://web.tribute.tg/p/vJm",
-        12: "https://web.tribute.tg/p/vJo",
     },
 }
 
@@ -187,19 +166,9 @@ def period_menu(plan: str):
 def payment_method_menu(plan: str, months: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Карта / СБП — скоро", callback_data="rub_payment_disabled")],
+            [InlineKeyboardButton(text="💳 Карта / СБП — скоро", callback_data="rub_disabled")],
             [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
             [InlineKeyboardButton(text="← Назад", callback_data=f"tariff_{plan}")],
-        ]
-    )
-
-
-def tribute_open_payment_menu(payment_url: str, plan: str, months: int):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Открыть оплату картой / СБП", url=payment_url)],
-            [InlineKeyboardButton(text="⭐ Оплатить Telegram Stars", callback_data=f"pay_stars_{plan}_{months}")],
-            [InlineKeyboardButton(text="← Назад", callback_data=f"period_{plan}_{months}")],
         ]
     )
 
@@ -242,11 +211,16 @@ def welcome_text():
 • Nano Banana Pro
 • Sora GPT Image
 
+📷 Анализ фото:
+• вопросы по изображениям
+• распознавание текста
+• помощь с заданиями по фото
+
 🧠 Наши каналы:
 • Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
 • Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>
 
-Напишите вопрос или выберите действие ниже."""
+Напишите вопрос, отправьте фото или выберите действие ниже."""
 
 
 def premium_text():
@@ -316,19 +290,6 @@ async def init_db():
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS months INTEGER DEFAULT 1;")
 
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS tribute_sessions (
-                token TEXT PRIMARY KEY,
-                telegram_id BIGINT NOT NULL,
-                plan TEXT NOT NULL,
-                months INTEGER NOT NULL,
-                tribute_url TEXT NOT NULL,
-                status TEXT DEFAULT 'created',
-                created_at TIMESTAMP DEFAULT NOW(),
-                clicked_at TIMESTAMP
-            );
-        """)
-
-        await conn.execute("""
             CREATE TABLE IF NOT EXISTS spam_state (
                 telegram_id BIGINT PRIMARY KEY,
                 window_start BIGINT DEFAULT 0,
@@ -370,8 +331,6 @@ async def setup_bot_info():
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
-    # Описание и вступление бота НЕ трогаем из кода.
-    # Их настраиваем вручную через BotFather, чтобы деплой не перезаписывал текст.
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -480,7 +439,12 @@ async def increase_usage(telegram_id):
 
 async def save_message(telegram_id, role, content):
     async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO messages (telegram_id, role, content) VALUES ($1, $2, $3)", telegram_id, role, content[:12000])
+        await conn.execute(
+            "INSERT INTO messages (telegram_id, role, content) VALUES ($1, $2, $3)",
+            telegram_id,
+            role,
+            content[:12000],
+        )
 
 
 async def get_chat_history(telegram_id, limit=10):
@@ -585,15 +549,20 @@ def messages_to_plain_text(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def ai_router(selected_model: str, messages: list[dict]):
+def system_prompt() -> str:
     current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
     today_text = datetime.now().strftime("%A, %d.%m.%Y")
-    system_text = (
+    return (
         "Ты профессиональный AI-ассистент. "
         "Отвечай понятно, структурно и по делу. "
         "Если пользователь пишет на русском — отвечай на русском. "
+        "Если пользователь отправил изображение, внимательно проанализируй его и ответь на вопрос. "
         f"Текущая дата и время: {current_datetime}. Сегодня: {today_text}."
     )
+
+
+async def ai_router(selected_model: str, messages: list[dict]):
+    system_text = system_prompt()
 
     if selected_model == "claude":
         if not anthropic_client:
@@ -643,6 +612,109 @@ async def ai_router(selected_model: str, messages: list[dict]):
         temperature=0.7,
     )
     return response.choices[0].message.content
+
+
+async def vision_router(selected_model: str, question: str, image_bytes: bytes, history: list[dict]):
+    system_text = system_prompt()
+    question = question.strip() or "Что изображено на фото? Опиши подробно и помоги пользователю."
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    if selected_model == "claude":
+        if not anthropic_client:
+            return "⚠️ Claude Vision пока не подключён. Администратору нужно добавить ANTHROPIC_API_KEY в Railway."
+
+        response = await anthropic_client.messages.create(
+            model=ANTHROPIC_VISION_MODEL,
+            max_tokens=2500,
+            temperature=0.7,
+            system=system_text,
+            messages=[
+                *normalize_anthropic_messages(history[-6:]),
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_b64,
+                            },
+                        },
+                        {"type": "text", "text": question},
+                    ],
+                },
+            ],
+        )
+        parts = []
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                parts.append(block.text)
+        return "\n".join(parts).strip()
+
+    if selected_model == "gemini":
+        if not google_client:
+            return "⚠️ Gemini Vision пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
+
+        prompt = (
+            f"{system_text}\n\n"
+            f"Краткая история диалога:\n{messages_to_plain_text(history[-6:])}\n\n"
+            f"Вопрос пользователя к изображению: {question}"
+        )
+
+        def run_gemini_vision():
+            response = google_client.models.generate_content(
+                model=GEMINI_VISION_MODEL,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                ],
+            )
+            return getattr(response, "text", "") or ""
+
+        return (await asyncio.to_thread(run_gemini_vision)).strip()
+
+    if selected_model in {"nanobanana", "gptimage"}:
+        return (
+            "📷 Вы сейчас выбрали генерацию изображений.\n\n"
+            "Чтобы задать вопрос по фото, выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть»."
+        )
+
+    openai_messages = [{"role": "system", "content": system_text}]
+    for msg in history[-6:]:
+        if msg.get("role") in {"user", "assistant"} and msg.get("content"):
+            openai_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    openai_messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": question},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_b64}",
+                        "detail": "auto",
+                    },
+                },
+            ],
+        }
+    )
+
+    response = await client.chat.completions.create(
+        model=OPENAI_VISION_MODEL,
+        messages=openai_messages,
+        temperature=0.7,
+    )
+    return response.choices[0].message.content
+
+
+async def download_telegram_photo(message: Message) -> bytes:
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buffer = BytesIO()
+    await bot.download_file(file.file_path, destination=buffer)
+    return buffer.getvalue()
 
 
 async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
@@ -723,304 +795,6 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
             parse_mode=parse_mode,
             link_preview_options=no_preview(),
         )
-
-
-def get_tribute_slug(url: str) -> str:
-    return url.rstrip("/").split("/")[-1]
-
-
-def tribute_slug_map():
-    result = {}
-    for plan, months_map in TRIBUTE_LINKS.items():
-        for months, url in months_map.items():
-            result[get_tribute_slug(url)] = (plan, months)
-    return result
-
-
-def collect_values(obj):
-    values = []
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            values.append((str(key), value))
-            values.extend(collect_values(value))
-    elif isinstance(obj, list):
-        for item in obj:
-            values.extend(collect_values(item))
-    return values
-
-
-def find_telegram_id_in_payload(payload) -> int | None:
-    keys = {
-        "telegram_id", "telegramid", "tg_id", "tgid", "telegram_user_id",
-        "telegramuserid", "telegram_userid", "buyer_telegram_id",
-        "customer_telegram_id", "user_telegram_id",
-    }
-    for key, value in collect_values(payload):
-        normalized_key = key.lower().replace("-", "_")
-        compact_key = normalized_key.replace("_", "")
-        if normalized_key in keys or compact_key in keys:
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-    return None
-
-
-def find_amount_in_payload(payload) -> int:
-    amount_keys = {"amount", "price", "total", "sum", "total_amount", "paid_amount"}
-    for key, value in collect_values(payload):
-        normalized_key = key.lower().replace("-", "_")
-        if normalized_key in amount_keys:
-            if isinstance(value, int):
-                return value
-            if isinstance(value, float):
-                return int(round(value))
-            if isinstance(value, str):
-                cleaned = value.replace(" ", "").replace("₽", "").replace("руб", "").replace(",", ".")
-                try:
-                    return int(round(float(cleaned)))
-                except Exception:
-                    pass
-    return 0
-
-
-def find_external_payment_id(payload) -> str:
-    id_keys = {"id", "payment_id", "transaction_id", "order_id", "invoice_id", "subscription_id"}
-    for key, value in collect_values(payload):
-        normalized_key = key.lower().replace("-", "_")
-        if normalized_key in id_keys and value:
-            return str(value)[:200]
-    return ""
-
-
-def is_tribute_payment_success(payload) -> bool:
-    text = json.dumps(payload, ensure_ascii=False).lower()
-    if "test" in text and "payment" not in text:
-        return False
-    success_words = [
-        "paid", "payment_succeeded", "payment.succeeded", "successful",
-        "success", "completed", "confirmed", "approved", "оплачен", "оплата",
-    ]
-    cancel_words = ["failed", "cancel", "refunded", "refund", "declined", "expired"]
-    if any(word in text for word in cancel_words):
-        return False
-    return any(word in text for word in success_words)
-
-
-def find_plan_months_in_payload(payload) -> tuple[str | None, int | None]:
-    text = json.dumps(payload, ensure_ascii=False)
-    lower_text = text.lower()
-
-    for slug, plan_months in tribute_slug_map().items():
-        if slug.lower() in lower_text:
-            return plan_months
-
-    plan = None
-    if "безлимит" in lower_text or "vip" in lower_text:
-        plan = "VIP"
-    elif "1400" in lower_text or "pro" in lower_text:
-        plan = "PRO"
-    elif "500" in lower_text or "plus" in lower_text:
-        plan = "PLUS"
-
-    months = None
-    for value in (12, 6, 3, 1):
-        if f"{value} месяц" in lower_text or f"{value} мес" in lower_text or f"{value}m" in lower_text:
-            months = value
-            break
-
-    return plan, months
-
-
-async def create_tribute_session(telegram_id: int, plan: str, months: int) -> str:
-    token = secrets.token_urlsafe(24)
-    tribute_url = TRIBUTE_LINKS[plan][months]
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO tribute_sessions (token, telegram_id, plan, months, tribute_url)
-            VALUES ($1, $2, $3, $4, $5)
-            """,
-            token,
-            telegram_id,
-            plan,
-            months,
-            tribute_url,
-        )
-    return f"{PUBLIC_BASE_URL}/start-buy?token={token}"
-
-
-async def find_pending_tribute_session(plan: str | None, months: int | None):
-    if not plan or not months:
-        return None
-
-    async with db_pool.acquire() as conn:
-        session = await conn.fetchrow(
-            """
-            SELECT * FROM tribute_sessions
-            WHERE plan=$1
-              AND months=$2
-              AND status='clicked'
-              AND clicked_at > NOW() - INTERVAL '45 minutes'
-            ORDER BY clicked_at DESC
-            LIMIT 1
-            """,
-            plan,
-            months,
-        )
-
-        if session:
-            return session
-
-        session = await conn.fetchrow(
-            """
-            SELECT * FROM tribute_sessions
-            WHERE plan=$1
-              AND months=$2
-              AND status='created'
-              AND created_at > NOW() - INTERVAL '45 minutes'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            plan,
-            months,
-        )
-
-    return session
-
-
-async def record_tribute_payment_and_activate(telegram_id: int, plan: str, months: int, amount: int, payload: dict, external_id: str = ""):
-    raw_payload = json.dumps(payload, ensure_ascii=False)[:12000]
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO payments (
-                telegram_id, plan, months, amount, currency, payload,
-                telegram_payment_charge_id, provider_payment_charge_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            """,
-            telegram_id,
-            plan,
-            months,
-            amount,
-            "RUB",
-            raw_payload,
-            external_id,
-            external_id,
-        )
-        await conn.execute(
-            """
-            UPDATE tribute_sessions
-            SET status='paid'
-            WHERE telegram_id=$1 AND plan=$2 AND months=$3 AND status IN ('created', 'clicked')
-            """,
-            telegram_id,
-            plan,
-            months,
-        )
-
-    await activate_plan(telegram_id, plan, months)
-
-    try:
-        await bot.send_message(
-            telegram_id,
-            f"✅ Оплата через банковскую карту / СБП прошла успешно!\n\nТариф {plan} активирован на {months} мес.",
-            reply_markup=main_menu(),
-        )
-    except Exception as e:
-        print(f"TRIBUTE USER NOTIFY ERROR: {e}")
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin_id,
-                f"💳 Tribute оплата активирована\n\nID: {telegram_id}\nТариф: {plan}\nПериод: {months} мес.\nСумма: {amount} RUB",
-            )
-        except Exception:
-            pass
-
-
-async def handle_start_buy(request: web.Request):
-    token = request.query.get("token", "")
-    if not token:
-        return web.Response(text="Payment token is missing", status=400)
-
-    async with db_pool.acquire() as conn:
-        session = await conn.fetchrow("SELECT * FROM tribute_sessions WHERE token=$1", token)
-        if not session:
-            return web.Response(text="Payment session not found", status=404)
-        await conn.execute("UPDATE tribute_sessions SET status='clicked', clicked_at=NOW() WHERE token=$1", token)
-
-    raise web.HTTPFound(session["tribute_url"])
-
-
-async def handle_tribute_webhook(request: web.Request):
-    try:
-        try:
-            payload = await request.json()
-        except Exception:
-            raw_text = await request.text()
-            payload = {"raw": raw_text}
-
-        await log_event(None, "tribute_webhook_raw", json.dumps(payload, ensure_ascii=False)[:1000])
-
-        if not is_tribute_payment_success(payload):
-            return web.json_response({"ok": True, "status": "ignored_non_success_event"})
-
-        plan, months = find_plan_months_in_payload(payload)
-        telegram_id = find_telegram_id_in_payload(payload)
-
-        if not telegram_id:
-            session = await find_pending_tribute_session(plan, months)
-            if session:
-                telegram_id = session["telegram_id"]
-                plan = session["plan"]
-                months = session["months"]
-
-        if not telegram_id or not plan or not months or plan not in TARIFFS:
-            details = json.dumps(payload, ensure_ascii=False)[:2500]
-            await log_event(None, "tribute_webhook_unmatched", details)
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(
-                        admin_id,
-                        "⚠️ Tribute webhook пришёл, но не удалось понять пользователя/тариф.\n\n"
-                        f"plan={plan}, months={months}, telegram_id={telegram_id}\n\n"
-                        f"payload: {details[:1500]}",
-                    )
-                except Exception:
-                    pass
-            return web.json_response({"ok": False, "error": "cannot_match_payment"}, status=202)
-
-        amount = find_amount_in_payload(payload)
-        external_id = find_external_payment_id(payload)
-        await record_tribute_payment_and_activate(telegram_id, plan, months, amount, payload, external_id)
-        return web.json_response({"ok": True, "activated": True, "telegram_id": telegram_id, "plan": plan, "months": months})
-
-    except Exception as e:
-        print(f"TRIBUTE WEBHOOK ERROR: {e}")
-        print(traceback.format_exc())
-        return web.json_response({"ok": False, "error": short_error_text(e)}, status=500)
-
-
-async def handle_health(request: web.Request):
-    return web.json_response({"ok": True, "service": "gptclaude-bot"})
-
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_health)
-    app.router.add_get("/health", handle_health)
-    app.router.add_get("/start-buy", handle_start_buy)
-    app.router.add_post("/tribute-webhook", handle_tribute_webhook)
-    app.router.add_get("/tribute-webhook", handle_health)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"WEB SERVER STARTED ON PORT {PORT}")
-    return runner
 
 
 @dp.message(CommandStart())
@@ -1138,30 +912,9 @@ async def period_callback(callback: CallbackQuery):
     )
 
 
-@dp.callback_query(F.data == "rub_payment_disabled")
-async def rub_payment_disabled_callback(callback: CallbackQuery):
+@dp.callback_query(F.data == "rub_disabled")
+async def rub_disabled_callback(callback: CallbackQuery):
     await callback.answer("Оплата рублями скоро будет доступна", show_alert=True)
-    await log_event(callback.from_user.id, "rub_payment_disabled_click")
-
-
-@dp.callback_query(F.data.startswith("pay_tribute_"))
-async def pay_tribute_callback(callback: CallbackQuery):
-    await callback.answer()
-    _, _, plan, months = callback.data.split("_")
-    months = int(months)
-    if plan not in TARIFFS or months not in TRIBUTE_LINKS[plan]:
-        await safe_edit_or_send(callback, "⚠️ Этот способ оплаты сейчас недоступен.", reply_markup=tariffs_menu())
-        return
-
-    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-    payment_url = await create_tribute_session(callback.from_user.id, plan, months)
-    await log_event(callback.from_user.id, "tribute_payment_open", f"{plan} {months}")
-
-    await safe_edit_or_send(
-        callback,
-        f"💳 Оплата банковской картой / СБП\n\nТариф: {plan}\nПериод: {months} мес.\n\nПосле оплаты бот автоматически активирует подписку.",
-        reply_markup=tribute_open_payment_menu(payment_url, plan, months),
-    )
 
 
 @dp.callback_query(F.data.startswith("pay_stars_"))
@@ -1254,7 +1007,7 @@ async def set_model_callback(callback: CallbackQuery):
 
     await bot.send_message(
         chat_id=callback.message.chat.id,
-        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос или выберите действие ниже.",
+        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос, отправьте фото или выберите действие ниже.",
         reply_markup=main_menu(),
     )
 
@@ -1292,6 +1045,7 @@ async def stats_handler(message: Message):
         starts_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at::date = CURRENT_DATE")
         premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='premium_click'")
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
+        vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
 
     await message.answer(
         "📊 Статистика бота\n\n"
@@ -1299,7 +1053,8 @@ async def stats_handler(message: Message):
         f"Новых сегодня: {today_users}\n"
         f"Стартов сегодня: {starts_today}\n\n"
         f"Сообщений всего: {total_messages}\n"
-        f"Сообщений сегодня: {today_messages}\n\n"
+        f"Сообщений сегодня: {today_messages}\n"
+        f"Фото-запросов всего: {vision_requests}\n\n"
         f"PLUS: {plus_users}\n"
         f"PRO: {pro_users}\n"
         f"VIP: {vip_users}\n\n"
@@ -1396,6 +1151,66 @@ async def setvip_handler(message: Message):
 @dp.message(Command("setfree"))
 async def setfree_handler(message: Message):
     await admin_set_plan(message, "FREE")
+
+
+@dp.message(F.photo)
+async def photo_handler(message: Message):
+    user = await get_or_create_user(message)
+    spam_allowed, wait_seconds = await check_spam(message.from_user.id)
+
+    if not spam_allowed:
+        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
+        return
+
+    allowed, reason = await check_limit(user)
+    if not allowed:
+        await log_event(message.from_user.id, "limit_reached", reason)
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        return
+
+    selected_model = user["selected_model"]
+    wait_message = await message.answer("📷 Анализирую фото...")
+
+    try:
+        question = message.caption or "Что изображено на фото?"
+        image_bytes = await download_telegram_photo(message)
+
+        await save_message(message.from_user.id, "user", f"[Фото] {question}")
+        history = await get_chat_history(message.from_user.id)
+        answer = await vision_router(selected_model, question, image_bytes, history)
+
+        if not answer:
+            answer = "⚠️ AI не смог проанализировать фото. Попробуйте отправить другое изображение или добавьте вопрос текстом."
+
+        await save_message(message.from_user.id, "assistant", answer)
+        await increase_usage(message.from_user.id)
+        await log_event(message.from_user.id, "ai_vision", selected_model)
+
+        if len(answer) <= 3900:
+            await wait_message.edit_text(answer)
+        else:
+            await wait_message.edit_text(answer[:3900])
+            for i in range(3900, len(answer), 3900):
+                await message.answer(answer[i:i + 3900])
+
+    except Exception as e:
+        admin_error = short_error_text(e)
+        print(f"VISION ERROR SHORT:\n{admin_error}")
+        print(f"VISION ERROR TRACE:\n{traceback.format_exc()}")
+        await send_ai_error_to_admin(f"⚠️ VISION ERROR | {selected_model} | {admin_error}")
+
+        try:
+            await wait_message.edit_text(
+                "⚠️ Не удалось обработать фото.\n\n"
+                "Попробуйте ещё раз или выберите другую нейросеть.",
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            await message.answer(
+                "⚠️ Не удалось обработать фото.\n\n"
+                "Попробуйте ещё раз или выберите другую нейросеть.",
+                reply_markup=main_menu(),
+            )
 
 
 @dp.message(F.text)
@@ -1508,6 +1323,33 @@ async def chat_handler(message: Message):
                 "Попробуйте позже или выберите другую нейросеть.",
                 reply_markup=main_menu(),
             )
+
+
+async def health_handler(request):
+    return web.json_response({"ok": True, "service": "gptclaude-bot"})
+
+
+async def tribute_webhook_handler(request):
+    try:
+        data = await request.json()
+        print(f"TRIBUTE WEBHOOK RECEIVED: {str(data)[:1000]}")
+        await log_event(None, "tribute_webhook_received", str(data)[:1000])
+    except Exception as e:
+        print(f"TRIBUTE WEBHOOK ERROR: {e}")
+    return web.json_response({"ok": True})
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    app.router.add_post("/tribute-webhook", tribute_webhook_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"WEB SERVER STARTED ON PORT {PORT}")
 
 
 async def main():
