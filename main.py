@@ -42,6 +42,7 @@ GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
+GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
 
 # Speed settings. You can override these in Railway Variables if needed.
 TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "6"))
@@ -49,6 +50,8 @@ VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
 TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
+MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
+FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
 
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -821,7 +824,7 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
         model=GPT_IMAGE_MODEL,
         prompt=prompt,
         size="1024x1024",
-        quality="medium",
+        quality=GPT_IMAGE_QUALITY,
         n=1,
     )
 
@@ -830,6 +833,114 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
         return normalize_b64(item.b64_json), "🌀 Готово"
 
     return None, "⚠️ Sora GPT Image не вернул изображение. Попробуйте другой запрос."
+
+
+async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None, str]:
+    def normalize_b64(value: str) -> bytes:
+        if value.startswith("data:image"):
+            value = value.split(",", 1)[1]
+        return base64.b64decode(value)
+
+    image_file = BytesIO(image_bytes)
+    image_file.name = "input.png"
+
+    response = await client.images.edit(
+        model=GPT_IMAGE_MODEL,
+        image=image_file,
+        prompt=prompt,
+        size="1024x1024",
+        quality=GPT_IMAGE_QUALITY,
+        n=1,
+    )
+
+    item = response.data[0]
+    if getattr(item, "b64_json", None):
+        return normalize_b64(item.b64_json), "🖼 Готово"
+
+    return None, "⚠️ Редактирование изображения не вернуло результат. Попробуйте другой запрос."
+
+
+async def download_telegram_document(message: Message) -> tuple[str, bytes]:
+    document = message.document
+    filename = document.file_name or "file"
+
+    if document.file_size and document.file_size > MAX_DOCUMENT_SIZE:
+        raise ValueError("FILE_TOO_LARGE")
+
+    file = await bot.get_file(document.file_id)
+    buffer = BytesIO()
+    await bot.download_file(file.file_path, destination=buffer)
+    return filename, buffer.getvalue()
+
+
+def extract_document_text(filename: str, file_bytes: bytes) -> str:
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+    if ext in {"txt", "md", "csv", "log"}:
+        for encoding in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
+            try:
+                return file_bytes.decode(encoding, errors="replace")[:FILE_TEXT_LIMIT]
+            except Exception:
+                continue
+        return file_bytes.decode("utf-8", errors="replace")[:FILE_TEXT_LIMIT]
+
+    if ext == "pdf":
+        try:
+            try:
+                from pypdf import PdfReader
+            except Exception:
+                from PyPDF2 import PdfReader
+
+            reader = PdfReader(BytesIO(file_bytes))
+            pages = []
+            for page in reader.pages[:25]:
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(text.strip())
+                if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
+                    break
+            return "\n\n".join(pages)[:FILE_TEXT_LIMIT]
+        except Exception as e:
+            raise ValueError(f"PDF_READ_ERROR: {e}")
+
+    if ext == "docx":
+        try:
+            from docx import Document
+            doc = Document(BytesIO(file_bytes))
+            parts = [p.text for p in doc.paragraphs if p.text.strip()]
+            return "\n".join(parts)[:FILE_TEXT_LIMIT]
+        except Exception as e:
+            raise ValueError(f"DOCX_READ_ERROR: {e}")
+
+    if ext in {"xlsx", "xlsm"}:
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
+            lines = []
+            for ws in wb.worksheets[:5]:
+                lines.append(f"Лист: {ws.title}")
+                for row in ws.iter_rows(max_row=80, values_only=True):
+                    values = [str(v) if v is not None else "" for v in row]
+                    if any(v.strip() for v in values):
+                        lines.append(" | ".join(values))
+                    if len("\n".join(lines)) >= FILE_TEXT_LIMIT:
+                        return "\n".join(lines)[:FILE_TEXT_LIMIT]
+            return "\n".join(lines)[:FILE_TEXT_LIMIT]
+        except Exception as e:
+            raise ValueError(f"XLSX_READ_ERROR: {e}")
+
+    raise ValueError("UNSUPPORTED_FILE_TYPE")
+
+
+async def file_router(selected_model: str, question: str, filename: str, extracted_text: str, history: list[dict]):
+    question = question.strip() or "Проанализируй файл, сделай краткое резюме и выдели главное."
+    content = (
+        f"Пользователь отправил файл: {filename}\n\n"
+        f"Вопрос пользователя: {question}\n\n"
+        f"Текст/данные из файла:\n{extracted_text}"
+    )
+    messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
+    return await ai_router(selected_model, messages)
 
 
 def short_error_text(error: Exception) -> str:
@@ -1257,11 +1368,31 @@ async def photo_handler(message: Message):
             "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
         )
 
-    wait_message = await message.answer("📷 Анализирую фото...")
+    is_image_edit = selected_model == "gptimage"
+    wait_message = await message.answer("🖼 Редактирую изображение..." if is_image_edit else "📷 Анализирую фото...")
 
     try:
-        question = message.caption or "Что изображено на фото?"
+        question = message.caption or ("Улучши это изображение и сохрани смысл." if is_image_edit else "Что изображено на фото?")
         image_bytes = await download_telegram_photo(message)
+
+        if is_image_edit:
+            await save_message(message.from_user.id, "user", f"[Редактирование изображения] {question}")
+            edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
+
+            if not edited_bytes:
+                await wait_message.edit_text(
+                    text_note or "⚠️ Редактирование не вернуло изображение. Попробуйте другой запрос.",
+                    reply_markup=main_menu(),
+                )
+                return
+
+            photo = BufferedInputFile(edited_bytes, filename="edited_gpt_image.png")
+            await wait_message.delete()
+            await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "✅ Готово"))
+            await save_message(message.from_user.id, "assistant", "[gptimage image edited]")
+            await increase_usage(message.from_user.id)
+            await log_event(message.from_user.id, "ai_image_edit", selected_model)
+            return
 
         await save_message(message.from_user.id, "user", f"[Фото] {question}")
         history = await get_chat_history(message.from_user.id)
@@ -1297,6 +1428,102 @@ async def photo_handler(message: Message):
             await message.answer(
                 "⚠️ Не удалось обработать фото.\n\n"
                 "Попробуйте ещё раз или выберите другую нейросеть.",
+                reply_markup=main_menu(),
+            )
+
+
+@dp.message(F.document)
+async def document_handler(message: Message):
+    user = await get_or_create_user(message)
+    spam_allowed, wait_seconds = await check_spam(message.from_user.id)
+
+    if not spam_allowed:
+        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
+        return
+
+    allowed, reason = await check_limit(user)
+    if not allowed:
+        await log_event(message.from_user.id, "limit_reached", reason)
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        return
+
+    selected_model = user["selected_model"]
+    if selected_model in {"nanobanana", "gptimage"}:
+        await message.answer(
+            "📎 Для анализа файлов выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть».",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if not has_model_access(user["plan"], selected_model):
+        selected_model = "gpt"
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
+        await message.answer(
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
+        )
+
+    wait_message = await message.answer("📎 Читаю файл...")
+
+    try:
+        filename, file_bytes = await download_telegram_document(message)
+        question = message.caption or "Проанализируй файл и выдели главное."
+
+        try:
+            extracted_text = await asyncio.to_thread(extract_document_text, filename, file_bytes)
+        except ValueError as e:
+            error_code = str(e)
+            if error_code == "FILE_TOO_LARGE":
+                await wait_message.edit_text("⚠️ Файл слишком большой. Сейчас лимит — до 10 МБ.", reply_markup=main_menu())
+            elif error_code == "UNSUPPORTED_FILE_TYPE":
+                await wait_message.edit_text("⚠️ Пока поддерживаются TXT, PDF, DOCX и XLSX.", reply_markup=main_menu())
+            else:
+                await wait_message.edit_text(
+                    "⚠️ Не удалось прочитать файл. Попробуйте другой файл или отправьте текстом.",
+                    reply_markup=main_menu(),
+                )
+            return
+
+        if not extracted_text.strip():
+            await wait_message.edit_text(
+                "⚠️ Не удалось извлечь текст из файла. Возможно, это скан или защищённый документ.",
+                reply_markup=main_menu(),
+            )
+            return
+
+        await wait_message.edit_text("🧠 Анализирую файл...")
+        await save_message(message.from_user.id, "user", f"[Файл {filename}] {question}")
+        history = await get_chat_history(message.from_user.id)
+        answer = await file_router(selected_model, question, filename, extracted_text, history)
+
+        if not answer:
+            answer = "⚠️ AI вернул пустой ответ. Попробуйте задать вопрос по файлу точнее."
+
+        await save_message(message.from_user.id, "assistant", answer)
+        await increase_usage(message.from_user.id)
+        await log_event(message.from_user.id, "ai_file", selected_model)
+
+        if len(answer) <= 3900:
+            await wait_message.edit_text(answer)
+        else:
+            await wait_message.edit_text(answer[:3900])
+            for i in range(3900, len(answer), 3900):
+                await message.answer(answer[i:i + 3900])
+
+    except Exception as e:
+        admin_error = short_error_text(e)
+        print(f"FILE ERROR SHORT:\n{admin_error}")
+        print(f"FILE ERROR TRACE:\n{traceback.format_exc()}")
+        await send_ai_error_to_admin(f"⚠️ FILE ERROR | {selected_model} | {admin_error}")
+
+        try:
+            await wait_message.edit_text(
+                "⚠️ Не удалось обработать файл. Попробуйте ещё раз или отправьте файл в другом формате.",
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            await message.answer(
+                "⚠️ Не удалось обработать файл. Попробуйте ещё раз или отправьте файл в другом формате.",
                 reply_markup=main_menu(),
             )
 
