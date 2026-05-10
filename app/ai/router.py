@@ -9,6 +9,8 @@ from google import genai
 from google.genai import types
 
 from app.ai.prompts import system_prompt, clean_ai_answer
+from app.ai.memory import build_memory
+from app.ai.personalities import get_personality
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -75,7 +77,8 @@ def messages_to_plain_text(messages: list[dict]) -> str:
 
 
 async def ai_router(selected_model: str, messages: list[dict]):
-    system_text = system_prompt()
+    memory = build_memory(messages, limit=TEXT_HISTORY_LIMIT)
+    system_text = system_prompt(get_personality(selected_model))
 
     if selected_model == "claude":
         if not anthropic_client:
@@ -84,9 +87,9 @@ async def ai_router(selected_model: str, messages: list[dict]):
         response = await anthropic_client.messages.create(
             model=ANTHROPIC_TEXT_MODEL,
             max_tokens=TEXT_MAX_TOKENS,
-            temperature=0.5,
+            temperature=0.45,
             system=system_text,
-            messages=normalize_anthropic_messages(messages),
+            messages=normalize_anthropic_messages(memory),
         )
         parts = []
         for block in response.content:
@@ -98,7 +101,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
         if not google_client:
             return "⚠️ Gemini пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
 
-        prompt = f"{system_text}\n\nИстория диалога:\n{messages_to_plain_text(messages)}"
+        prompt = f"{system_text}\n\nКраткая память диалога:\n{messages_to_plain_text(memory)}"
 
         def run_gemini():
             response = google_client.models.generate_content(
@@ -110,20 +113,20 @@ async def ai_router(selected_model: str, messages: list[dict]):
         return clean_ai_answer((await asyncio.to_thread(run_gemini)).strip())
 
     if selected_model == "deepseek" and deepseek_client:
-        full_messages = [{"role": "system", "content": system_text}, *messages]
+        full_messages = [{"role": "system", "content": system_text}, *memory]
         response = await deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=full_messages,
-            temperature=0.5,
+            temperature=0.45,
         )
         return clean_ai_answer(response.choices[0].message.content)
 
-    full_messages = [{"role": "system", "content": system_text}, *messages]
+    full_messages = [{"role": "system", "content": system_text}, *memory]
     response = await asyncio.wait_for(
         client.chat.completions.create(
             model=OPENAI_TEXT_MODEL,
             messages=full_messages,
-            temperature=0.5,
+            temperature=0.45,
             max_completion_tokens=TEXT_MAX_TOKENS,
         ),
         timeout=AI_TIMEOUT_SECONDS,
@@ -132,7 +135,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
 
 
 async def vision_router(selected_model: str, question: str, image_bytes: bytes, history: list[dict]):
-    system_text = system_prompt()
+    system_text = system_prompt(get_personality(selected_model))
     question = question.strip() or "Что изображено на фото? Опиши подробно и помоги пользователю."
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -448,7 +451,7 @@ async def analyze_pdf_images_with_openai(question: str, filename: str, file_byte
             }
         )
 
-    openai_messages = [{"role": "system", "content": system_prompt()}]
+    openai_messages = [{"role": "system", "content": system_prompt(get_personality(selected_model))}]
     for msg in history[-VISION_HISTORY_LIMIT:]:
         if msg.get("role") in {"user", "assistant"} and msg.get("content"):
             openai_messages.append({"role": msg["role"], "content": msg["content"]})
@@ -475,5 +478,6 @@ async def file_router(selected_model: str, question: str, filename: str, extract
     )
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
     return await ai_router(selected_model, messages)
+
 
 
