@@ -618,7 +618,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
             model=OPENAI_TEXT_MODEL,
             messages=full_messages,
             temperature=0.5,
-            max_tokens=TEXT_MAX_TOKENS,
+            max_completion_tokens=TEXT_MAX_TOKENS,
         ),
         timeout=AI_TIMEOUT_SECONDS,
     )
@@ -717,7 +717,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
             model=OPENAI_VISION_MODEL,
             messages=openai_messages,
             temperature=0.4,
-            max_tokens=VISION_MAX_TOKENS,
+            max_completion_tokens=VISION_MAX_TOKENS,
         ),
         timeout=AI_TIMEOUT_SECONDS,
     )
@@ -1390,4 +1390,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
