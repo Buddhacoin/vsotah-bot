@@ -1,13 +1,14 @@
 import asyncio
 import base64
 import os
-from datetime import datetime
 from io import BytesIO
 
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 from google import genai
 from google.genai import types
+
+from app.ai.prompts import system_prompt, clean_ai_answer
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -72,17 +73,6 @@ def messages_to_plain_text(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def system_prompt() -> str:
-    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
-    today_text = datetime.now().strftime("%A, %d.%m.%Y")
-    return (
-        "Ты профессиональный AI-ассистент. "
-        "Отвечай понятно, структурно и по делу. "
-        "Если пользователь пишет на русском — отвечай на русском. "
-        "Если пользователь отправил изображение, внимательно проанализируй его и ответь на вопрос. "
-        f"Текущая дата и время: {current_datetime}. Сегодня: {today_text}."
-    )
-
 
 async def ai_router(selected_model: str, messages: list[dict]):
     system_text = system_prompt()
@@ -102,7 +92,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 parts.append(block.text)
-        return "\n".join(parts).strip()
+        return clean_ai_answer("\n".join(parts).strip())
 
     if selected_model == "gemini":
         if not google_client:
@@ -117,7 +107,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
             )
             return getattr(response, "text", "") or ""
 
-        return (await asyncio.to_thread(run_gemini)).strip()
+        return clean_ai_answer((await asyncio.to_thread(run_gemini)).strip())
 
     if selected_model == "deepseek" and deepseek_client:
         full_messages = [{"role": "system", "content": system_text}, *messages]
@@ -126,7 +116,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
             messages=full_messages,
             temperature=0.5,
         )
-        return response.choices[0].message.content
+        return clean_ai_answer(response.choices[0].message.content)
 
     full_messages = [{"role": "system", "content": system_text}, *messages]
     response = await asyncio.wait_for(
@@ -138,7 +128,7 @@ async def ai_router(selected_model: str, messages: list[dict]):
         ),
         timeout=AI_TIMEOUT_SECONDS,
     )
-    return response.choices[0].message.content
+    return clean_ai_answer(response.choices[0].message.content)
 
 
 async def vision_router(selected_model: str, question: str, image_bytes: bytes, history: list[dict]):
@@ -177,7 +167,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 parts.append(block.text)
-        return "\n".join(parts).strip()
+        return clean_ai_answer("\n".join(parts).strip())
 
     if selected_model == "gemini":
         if not google_client:
@@ -199,7 +189,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
             )
             return getattr(response, "text", "") or ""
 
-        return (await asyncio.to_thread(run_gemini_vision)).strip()
+        return clean_ai_answer((await asyncio.to_thread(run_gemini_vision)).strip())
 
     if selected_model in {"nanobanana", "gptimage"}:
         return (
@@ -237,7 +227,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
         ),
         timeout=AI_TIMEOUT_SECONDS,
     )
-    return response.choices[0].message.content
+    return clean_ai_answer(response.choices[0].message.content)
 
 
 async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> str:
@@ -473,7 +463,7 @@ async def analyze_pdf_images_with_openai(question: str, filename: str, file_byte
         ),
         timeout=AI_TIMEOUT_SECONDS,
     )
-    return response.choices[0].message.content or ""
+    return clean_ai_answer(response.choices[0].message.content or "")
 
 
 async def file_router(selected_model: str, question: str, filename: str, extracted_text: str, history: list[dict]):
@@ -485,4 +475,5 @@ async def file_router(selected_model: str, question: str, filename: str, extract
     )
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
     return await ai_router(selected_model, messages)
+
 
