@@ -68,6 +68,7 @@ ADMIN_IDS = {
 
 FREE_DAILY_LIMIT = 15
 FREE_WEEKLY_LIMIT = 105
+FREE_DAILY_IMAGE_LIMIT = 5
 
 PLAN_WEEKLY_LIMITS = {
     "FREE": 105,
@@ -126,11 +127,11 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini 🟢 FREE", callback_data="set_model_gpt")],
-            [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash 🟢 FREE", callback_data="set_model_gemini")],
-            [InlineKeyboardButton(text="✴️ Claude — Sonnet ⭐ PLUS", callback_data="set_model_claude")],
-            [InlineKeyboardButton(text="🍌 Nano Banana Pro 💎 PRO", callback_data="set_model_nanobanana")],
-            [InlineKeyboardButton(text="🌀 Sora GPT Image 👑 VIP", callback_data="set_model_gptimage")],
+            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash", callback_data="set_model_gemini")],
+            [InlineKeyboardButton(text="✴️ Claude — Sonnet", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="🍌 Nano Banana Pro", callback_data="set_model_nanobanana")],
+            [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -203,9 +204,9 @@ PLAN_LEVELS = {
 MODEL_REQUIRED_PLAN = {
     "gpt": "FREE",
     "gemini": "FREE",
-    "claude": "PLUS",
-    "nanobanana": "PRO",
-    "gptimage": "VIP",
+    "claude": "FREE",
+    "nanobanana": "FREE",
+    "gptimage": "FREE",
 }
 
 
@@ -223,13 +224,13 @@ def has_model_access(user_plan: str | None, model: str) -> bool:
 
 def model_display_name(model: str) -> str:
     names = {
-        "gpt": "🌀 ChatGPT — GPT-4o mini 🟢 FREE",
-        "gemini": "✦ Gemini — 2.5 Flash 🟢 FREE",
-        "claude": "✴️ Claude — Sonnet ⭐ PLUS",
-        "nanobanana": "🍌 Nano Banana Pro 💎 PRO",
-        "gptimage": "🌀 Sora GPT Image 👑 VIP",
+        "gpt": "🌀 ChatGPT — GPT-4o mini",
+        "gemini": "✦ Gemini — 2.5 Flash",
+        "claude": "✴️ Claude — Sonnet",
+        "nanobanana": "🍌 Nano Banana Pro",
+        "gptimage": "🌀 Sora GPT Image",
     }
-    return names.get(model, "🌀 ChatGPT — GPT-4o mini 🟢 FREE")
+    return names.get(model, "🌀 ChatGPT — GPT-4o mini")
 
 
 def premium_required_text(model: str) -> str:
@@ -272,20 +273,25 @@ def premium_text():
 🟢 FREE
 • ChatGPT — GPT-4o mini
 • Gemini — 2.5 Flash
-• 15 запросов в день / 105 в неделю
+• Claude — Sonnet
+• Nano Banana Pro
+• Sora GPT Image
+
+• 15 запросов в день
+• из них 5 Image
+• 105 запросов в неделю
 
 ⭐ PLUS — 500 запросов в неделю
-• Claude Sonnet
+• Все модели
 • больше лимитов
 
 💎 PRO — 1400 запросов в неделю
-• Nano Banana Pro
-• генерация изображений
+• Все модели
+• больше лимитов
 
 👑 VIP — безлимит
-• Sora GPT Image
+• Все модели
 • максимум возможностей"""
-
 
 def channels_text():
     return """🧠 Наши каналы:
@@ -308,6 +314,7 @@ async def init_db():
                 selected_model TEXT DEFAULT 'gpt',
                 daily_used INTEGER DEFAULT 0,
                 weekly_used INTEGER DEFAULT 0,
+                daily_image_used INTEGER DEFAULT 0,
                 day_start DATE DEFAULT CURRENT_DATE,
                 week_start DATE DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT NOW()
@@ -317,6 +324,7 @@ async def init_db():
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_model TEXT DEFAULT 'gpt';")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_used INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_used INTEGER DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_image_used INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS day_start DATE DEFAULT CURRENT_DATE;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS week_start DATE DEFAULT CURRENT_DATE;")
 
@@ -408,7 +416,11 @@ async def get_or_create_user_by_data(telegram_id, username=None, first_name=None
         user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
 
         if user["day_start"] != today:
-            await conn.execute("UPDATE users SET daily_used=0, day_start=$2 WHERE telegram_id=$1", telegram_id, today)
+            await conn.execute(
+                "UPDATE users SET daily_used=0, daily_image_used=0, day_start=$2 WHERE telegram_id=$1",
+                telegram_id,
+                today,
+            )
 
         if user["week_start"] != week_start:
             await conn.execute("UPDATE users SET weekly_used=0, week_start=$2 WHERE telegram_id=$1", telegram_id, week_start)
@@ -493,6 +505,21 @@ async def increase_usage(telegram_id):
         """, telegram_id)
 
 
+async def check_free_image_limit(user):
+    if (user["plan"] or "FREE") != "FREE":
+        return True
+    return (user["daily_image_used"] or 0) < FREE_DAILY_IMAGE_LIMIT
+
+
+async def increase_image_usage(telegram_id):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users
+            SET daily_image_used = daily_image_used + 1
+            WHERE telegram_id=$1
+        """, telegram_id)
+
+
 async def save_message(telegram_id, role, content):
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -531,7 +558,7 @@ async def activate_plan(telegram_id: int, plan: str, months: int):
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE users
-            SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0
+            SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0, daily_image_used=0
             WHERE telegram_id=$1
         """, telegram_id, plan, until)
     await log_event(telegram_id, "activate_plan", f"{plan} {months} months")
@@ -557,6 +584,7 @@ async def user_profile_text(user):
     else:
         usage_block = (
             f"Запросов сегодня: {user['daily_used']}/{FREE_DAILY_LIMIT}\n"
+            f"Image сегодня: {user['daily_image_used'] or 0}/{FREE_DAILY_IMAGE_LIMIT}\n"
             f"Запросов в неделю: {user['weekly_used']}/{FREE_WEEKLY_LIMIT}"
         )
 
@@ -752,8 +780,7 @@ async def models_command(message: Message):
     await log_event(message.from_user.id, "models_command")
     await message.answer(
         "🤖 Выберите нейросеть:\n\n"
-        "🟢 FREE доступно всем\n"
-        "⭐ PLUS / 💎 PRO / 👑 VIP открываются после подписки",
+        "Все базовые модели сейчас доступны бесплатно.",
         reply_markup=models_menu(),
     )
 
@@ -805,8 +832,7 @@ async def models_callback(callback: CallbackQuery):
     await safe_edit_or_send(
         callback,
         "🤖 Выберите нейросеть:\n\n"
-        "🟢 FREE доступно всем\n"
-        "⭐ PLUS / 💎 PRO / 👑 VIP открываются после подписки",
+        "Все базовые модели сейчас доступны бесплатно.",
         reply_markup=models_menu(),
     )
 
@@ -956,7 +982,6 @@ async def admin_handler(message: Message):
         "/stats — общая статистика\n"
         "/users — последние пользователи\n"
         "/payments — платежи\n"
-        "/events — последние события\n"
         "/setplus telegram_id\n"
         "/setpro telegram_id\n"
         "/setvip telegram_id\n"
@@ -992,9 +1017,6 @@ async def stats_handler(message: Message):
         total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user'")
         today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at::date = CURRENT_DATE")
         messages_24h = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at >= NOW() - INTERVAL '24 hours'")
-        incoming_text_total = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='incoming_text'")
-        incoming_text_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='incoming_text' AND created_at::date = CURRENT_DATE")
-        incoming_text_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='incoming_text' AND created_at >= NOW() - INTERVAL '24 hours'")
         vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
         image_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('ai_image', 'ai_image_edit')")
         file_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_file'")
@@ -1033,9 +1055,6 @@ async def stats_handler(message: Message):
         f"💬 Сообщений всего: {total_messages}\n"
         f"💬 Сообщений сегодня: {today_messages}\n"
         f"💬 Сообщений за 24 часа: {messages_24h}\n"
-        f"📥 Входящих текстов всего: {incoming_text_total}\n"
-        f"📥 Входящих текстов сегодня: {incoming_text_today}\n"
-        f"📥 Входящих текстов за 24 часа: {incoming_text_24h}\n"
         f"📷 Фото-запросов всего: {vision_requests}\n"
         f"🖼 Image-запросов всего: {image_requests}\n"
         f"📎 Файл-запросов всего: {file_requests}\n\n"
@@ -1048,49 +1067,6 @@ async def stats_handler(message: Message):
         f"⭐ Stars получено: {total_stars}\n\n"
         f"🤖 Модели сегодня:\n{model_text}"
     )
-
-
-@dp.message(Command("events"))
-async def events_handler(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT telegram_id, event_type, details, created_at
-            FROM events
-            ORDER BY created_at DESC
-            LIMIT 25
-        """)
-
-        msg_rows = await conn.fetch("""
-            SELECT telegram_id, role, content, created_at
-            FROM messages
-            ORDER BY created_at DESC
-            LIMIT 10
-        """)
-
-    text = "🧾 Последние события\n\n"
-    if not rows:
-        text += "Событий пока нет.\n"
-    for row in rows:
-        details = (row["details"] or "").replace("\n", " ")[:80]
-        text += (
-            f"{row['created_at'].strftime('%d.%m %H:%M:%S')} | "
-            f"{row['telegram_id']} | {row['event_type']} | {details}\n"
-        )
-
-    text += "\n💬 Последние сообщения\n\n"
-    if not msg_rows:
-        text += "Сообщений пока нет."
-    for row in msg_rows:
-        content = (row["content"] or "").replace("\n", " ")[:80]
-        text += (
-            f"{row['created_at'].strftime('%d.%m %H:%M:%S')} | "
-            f"{row['telegram_id']} | {row['role']} | {content}\n"
-        )
-
-    await message.answer(text[:3900])
 
 
 @dp.message(Command("users"))
@@ -1185,7 +1161,6 @@ async def setfree_handler(message: Message):
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     user = await get_or_create_user(message)
-    await log_event(message.from_user.id, "incoming_photo", message.caption or "")
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
@@ -1204,10 +1179,19 @@ async def photo_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
         )
 
     is_image_edit = selected_model == "gptimage"
+    if is_image_edit and not await check_free_image_limit(user):
+        await log_event(message.from_user.id, "limit_reached", "FREE_IMAGE_DAY_LIMIT")
+        await message.answer(
+            "🖼 Вы исчерпали бесплатный лимит генерации изображений.\n\n"
+            "FREE: 5 Image в день. Перейдите на PLUS, PRO или VIP, чтобы получить больше лимитов.",
+            reply_markup=tariffs_menu(),
+        )
+        return
+
     wait_message = await message.answer("🖼 Редактирую изображение..." if is_image_edit else "📷 Анализирую фото...")
 
     try:
@@ -1230,6 +1214,7 @@ async def photo_handler(message: Message):
             await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "✅ Готово"))
             await save_message(message.from_user.id, "assistant", "[gptimage image edited]")
             await increase_usage(message.from_user.id)
+            await increase_image_usage(message.from_user.id)
             await log_event(message.from_user.id, "ai_image_edit", selected_model)
             return
 
@@ -1273,7 +1258,6 @@ async def photo_handler(message: Message):
 @dp.message(F.document)
 async def document_handler(message: Message):
     user = await get_or_create_user(message)
-    await log_event(message.from_user.id, "incoming_document", message.document.file_name if message.document else "")
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
@@ -1299,7 +1283,7 @@ async def document_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
         )
 
     wait_message = await message.answer("📎 Читаю файл...")
@@ -1383,7 +1367,6 @@ async def chat_handler(message: Message):
         return
 
     user = await get_or_create_user(message)
-    await log_event(message.from_user.id, "incoming_text", (message.text or "")[:300])
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
@@ -1402,10 +1385,19 @@ async def chat_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini 🟢 FREE."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
         )
 
     if selected_model in {"nanobanana", "gptimage"}:
+        if not await check_free_image_limit(user):
+            await log_event(message.from_user.id, "limit_reached", "FREE_IMAGE_DAY_LIMIT")
+            await message.answer(
+                "🖼 Вы исчерпали бесплатный лимит генерации изображений.\n\n"
+                "FREE: 5 Image в день. Перейдите на PLUS, PRO или VIP, чтобы получить больше лимитов.",
+                reply_markup=tariffs_menu(),
+            )
+            return
+
         wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🌀 Генерирую изображение..."
         wait_message = await message.answer(wait_text)
         try:
@@ -1433,6 +1425,7 @@ async def chat_handler(message: Message):
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
             await increase_usage(message.from_user.id)
+            await increase_image_usage(message.from_user.id)
             await log_event(message.from_user.id, "ai_image", selected_model)
             return
 
