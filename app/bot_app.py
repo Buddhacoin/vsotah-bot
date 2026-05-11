@@ -752,14 +752,6 @@ async def start_handler(message: Message):
         return
     recent_starts[message.from_user.id] = now
 
-    # В приватном чате Telegram показывает отправленную пользователем команду /start.
-    # Чтобы после приветствия не оставался лишний новый /start сверху/снизу,
-    # аккуратно удаляем само входящее сообщение. Если Telegram не даст удалить — просто игнорируем.
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
     user = await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
     await message.answer(
