@@ -579,34 +579,12 @@ async def user_profile_text(user):
     return text
 
 
-
-
-
-
-
-
-
-
-
-
 async def download_telegram_photo(message: Message) -> bytes:
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     buffer = BytesIO()
     await bot.download_file(file.file_path, destination=buffer)
     return buffer.getvalue()
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def download_telegram_document(message: Message) -> tuple[str, bytes]:
@@ -707,14 +685,6 @@ def extract_document_text(filename: str, file_bytes: bytes) -> str:
             raise ValueError(f"XLSX_READ_ERROR: {e}")
 
     raise ValueError("UNSUPPORTED_FILE_TYPE")
-
-
-
-
-
-
-
-
 
 
 def short_error_text(error: Exception) -> str:
@@ -1000,89 +970,76 @@ async def stats_handler(message: Message):
 
     async with db_pool.acquire() as conn:
         total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        today_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE")
-        new_users_events_today = await conn.fetchval("""
-            SELECT COUNT(DISTINCT telegram_id)
-            FROM events
-            WHERE event_type='new_user'
-              AND created_at >= CURRENT_DATE
-              AND telegram_id IS NOT NULL
-        """)
-
+        new_users_today = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at::date = CURRENT_DATE")
         active_today = await conn.fetchval("""
             SELECT COUNT(DISTINCT telegram_id)
-            FROM (
-                SELECT telegram_id FROM events WHERE created_at >= CURRENT_DATE AND telegram_id IS NOT NULL
-                UNION
-                SELECT telegram_id FROM messages WHERE created_at >= CURRENT_DATE AND telegram_id IS NOT NULL
-            ) AS active_users
+            FROM events
+            WHERE telegram_id IS NOT NULL AND created_at::date = CURRENT_DATE
         """)
         active_24h = await conn.fetchval("""
             SELECT COUNT(DISTINCT telegram_id)
-            FROM (
-                SELECT telegram_id FROM events WHERE created_at >= NOW() - INTERVAL '24 hours' AND telegram_id IS NOT NULL
-                UNION
-                SELECT telegram_id FROM messages WHERE created_at >= NOW() - INTERVAL '24 hours' AND telegram_id IS NOT NULL
-            ) AS active_users
+            FROM events
+            WHERE telegram_id IS NOT NULL AND created_at >= NOW() - INTERVAL '24 hours'
         """)
         active_7d = await conn.fetchval("""
             SELECT COUNT(DISTINCT telegram_id)
-            FROM (
-                SELECT telegram_id FROM events WHERE created_at >= NOW() - INTERVAL '7 days' AND telegram_id IS NOT NULL
-                UNION
-                SELECT telegram_id FROM messages WHERE created_at >= NOW() - INTERVAL '7 days' AND telegram_id IS NOT NULL
-            ) AS active_users
+            FROM events
+            WHERE telegram_id IS NOT NULL AND created_at >= NOW() - INTERVAL '7 days'
         """)
-
+        starts_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at::date = CURRENT_DATE")
+        starts_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at >= NOW() - INTERVAL '24 hours'")
         total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user'")
-        today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at >= CURRENT_DATE")
+        today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at::date = CURRENT_DATE")
         messages_24h = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at >= NOW() - INTERVAL '24 hours'")
-
+        vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
+        image_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('ai_image', 'ai_image_edit')")
+        file_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_file'")
         plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
         pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
         vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
-
-        total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
-        starts_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at >= CURRENT_DATE")
-        starts_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at >= NOW() - INTERVAL '24 hours'")
-        events_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE created_at >= CURRENT_DATE")
-
-        premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('premium_open', 'premium_click')")
+        premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('premium_click', 'premium_open')")
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
-        vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
-        image_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_image'")
-        file_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_file'")
+        payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
+        total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
 
-        gpt_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_message' AND details='gpt' AND created_at >= CURRENT_DATE")
-        claude_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_message' AND details='claude' AND created_at >= CURRENT_DATE")
-        gemini_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_message' AND details='gemini' AND created_at >= CURRENT_DATE")
+        model_rows = await conn.fetch("""
+            SELECT details AS model, COUNT(*) AS count
+            FROM events
+            WHERE event_type IN ('ai_message', 'ai_vision', 'ai_image', 'ai_image_edit', 'ai_file')
+              AND created_at::date = CURRENT_DATE
+            GROUP BY details
+            ORDER BY count DESC
+        """)
+
+    model_text = ""
+    if model_rows:
+        model_text = "\n".join(f"• {row['model'] or 'unknown'}: {row['count']}" for row in model_rows)
+    else:
+        model_text = "• сегодня запросов по моделям пока нет"
 
     await message.answer(
         "📊 Статистика VSotahBot\n\n"
-        f"Пользователей всего: {total_users}\n"
-        f"Новых сегодня: {today_users}\n"
-        f"Новых сегодня по событиям: {new_users_events_today}\n"
-        f"Активных сегодня: {active_today}\n"
-        f"Активных за 24 часа: {active_24h}\n"
-        f"Активных за 7 дней: {active_7d}\n"
-        f"Стартов сегодня: {starts_today}\n"
-        f"Стартов за 24 часа: {starts_24h}\n"
-        f"Событий сегодня: {events_today}\n\n"
-        f"Сообщений всего: {total_messages}\n"
-        f"Сообщений сегодня: {today_messages}\n"
-        f"Сообщений за 24 часа: {messages_24h}\n\n"
-        f"Фото-анализов всего: {vision_requests}\n"
-        f"Генераций изображений всего: {image_requests}\n"
-        f"Файлов всего: {file_requests}\n\n"
-        f"ChatGPT сегодня: {gpt_today}\n"
-        f"Claude сегодня: {claude_today}\n"
-        f"Gemini сегодня: {gemini_today}\n\n"
-        f"PLUS: {plus_users}\n"
-        f"PRO: {pro_users}\n"
-        f"VIP: {vip_users}\n\n"
-        f"Открытий премиума: {premium_clicks}\n"
-        f"Открытий оплаты Stars: {invoices}\n"
-        f"Stars получено: {total_stars}"
+        f"👥 Пользователи всего: {total_users}\n"
+        f"🆕 Новых сегодня: {new_users_today}\n"
+        f"🔥 Активных сегодня: {active_today}\n"
+        f"⏱ Активных за 24 часа: {active_24h}\n"
+        f"📅 Активных за 7 дней: {active_7d}\n\n"
+        f"🚀 Стартов сегодня: {starts_today}\n"
+        f"🚀 Стартов за 24 часа: {starts_24h}\n\n"
+        f"💬 Сообщений всего: {total_messages}\n"
+        f"💬 Сообщений сегодня: {today_messages}\n"
+        f"💬 Сообщений за 24 часа: {messages_24h}\n"
+        f"📷 Фото-запросов всего: {vision_requests}\n"
+        f"🖼 Image-запросов всего: {image_requests}\n"
+        f"📎 Файл-запросов всего: {file_requests}\n\n"
+        f"⭐ PLUS: {plus_users}\n"
+        f"💎 PRO: {pro_users}\n"
+        f"👑 VIP: {vip_users}\n\n"
+        f"💳 Открытий премиума: {premium_clicks}\n"
+        f"⭐ Открытий оплаты Stars: {invoices}\n"
+        f"✅ Платежей: {payments_count}\n"
+        f"⭐ Stars получено: {total_stars}\n\n"
+        f"🤖 Модели сегодня:\n{model_text}"
     )
 
 
@@ -1488,7 +1445,7 @@ async def chat_handler(message: Message):
 
 
 async def health_handler(request):
-    return web.json_response({"ok": True, "service": "gptclaude-bot"})
+    return web.json_response({"ok": True, "service": "vsotah-bot"})
 
 
 async def tribute_webhook_handler(request):
