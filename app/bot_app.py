@@ -151,7 +151,7 @@ def channels_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⚡ Молния Live", url="https://t.me/MolniyaLiveNews")],
-            [InlineKeyboardButton(text="⚡ Молния News", url="https://t.me/LightningNewsSupport")],
+            [InlineKeyboardButton(text="⚡ VSotah AI", url="https://t.me/VSotahAI")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -241,7 +241,7 @@ def premium_required_text(model: str) -> str:
 
 
 def welcome_text():
-    return """👋 Добро пожаловать в @GPTclaudeAIbot
+    return """👋 Добро пожаловать в @VSotahBot
 
 Ваш AI-бот для работы с нейросетями в одном месте.
 
@@ -261,7 +261,7 @@ def welcome_text():
 
 🧠 Наши каналы:
 • Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
-• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>
+• Канал support: <a href='https://t.me/VSotahAI'>VSotah AI</a>
 
 Напишите вопрос, отправьте фото или выберите действие ниже."""
 
@@ -291,7 +291,7 @@ def channels_text():
     return """🧠 Наши каналы:
 
 • Наш канал: <a href='https://t.me/MolniyaLiveNews'>Молния Live</a>
-• Канал support: <a href='https://t.me/LightningNewsSupport'>Молния News</a>"""
+• Канал support: <a href='https://t.me/VSotahAI'>VSotah AI</a>"""
 
 
 async def init_db():
@@ -1480,4 +1480,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
