@@ -1000,26 +1000,83 @@ async def stats_handler(message: Message):
 
     async with db_pool.acquire() as conn:
         total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        today_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at::date = CURRENT_DATE")
+        today_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE")
+        new_users_events_today = await conn.fetchval("""
+            SELECT COUNT(DISTINCT telegram_id)
+            FROM events
+            WHERE event_type='new_user'
+              AND created_at >= CURRENT_DATE
+              AND telegram_id IS NOT NULL
+        """)
+
+        active_today = await conn.fetchval("""
+            SELECT COUNT(DISTINCT telegram_id)
+            FROM (
+                SELECT telegram_id FROM events WHERE created_at >= CURRENT_DATE AND telegram_id IS NOT NULL
+                UNION
+                SELECT telegram_id FROM messages WHERE created_at >= CURRENT_DATE AND telegram_id IS NOT NULL
+            ) AS active_users
+        """)
+        active_24h = await conn.fetchval("""
+            SELECT COUNT(DISTINCT telegram_id)
+            FROM (
+                SELECT telegram_id FROM events WHERE created_at >= NOW() - INTERVAL '24 hours' AND telegram_id IS NOT NULL
+                UNION
+                SELECT telegram_id FROM messages WHERE created_at >= NOW() - INTERVAL '24 hours' AND telegram_id IS NOT NULL
+            ) AS active_users
+        """)
+        active_7d = await conn.fetchval("""
+            SELECT COUNT(DISTINCT telegram_id)
+            FROM (
+                SELECT telegram_id FROM events WHERE created_at >= NOW() - INTERVAL '7 days' AND telegram_id IS NOT NULL
+                UNION
+                SELECT telegram_id FROM messages WHERE created_at >= NOW() - INTERVAL '7 days' AND telegram_id IS NOT NULL
+            ) AS active_users
+        """)
+
         total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user'")
-        today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at::date = CURRENT_DATE")
+        today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at >= CURRENT_DATE")
+        messages_24h = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at >= NOW() - INTERVAL '24 hours'")
+
         plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
         pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
         vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
+
         total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
-        starts_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at::date = CURRENT_DATE")
-        premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='premium_click'")
+        starts_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at >= CURRENT_DATE")
+        starts_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='start' AND created_at >= NOW() - INTERVAL '24 hours'")
+        events_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE created_at >= CURRENT_DATE")
+
+        premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('premium_open', 'premium_click')")
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
         vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
+        image_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_image'")
+        file_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_file'")
+
+        gpt_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_message' AND details='gpt' AND created_at >= CURRENT_DATE")
+        claude_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_message' AND details='claude' AND created_at >= CURRENT_DATE")
+        gemini_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_message' AND details='gemini' AND created_at >= CURRENT_DATE")
 
     await message.answer(
-        "📊 Статистика бота\n\n"
+        "📊 Статистика VSotahBot\n\n"
         f"Пользователей всего: {total_users}\n"
         f"Новых сегодня: {today_users}\n"
-        f"Стартов сегодня: {starts_today}\n\n"
+        f"Новых сегодня по событиям: {new_users_events_today}\n"
+        f"Активных сегодня: {active_today}\n"
+        f"Активных за 24 часа: {active_24h}\n"
+        f"Активных за 7 дней: {active_7d}\n"
+        f"Стартов сегодня: {starts_today}\n"
+        f"Стартов за 24 часа: {starts_24h}\n"
+        f"Событий сегодня: {events_today}\n\n"
         f"Сообщений всего: {total_messages}\n"
         f"Сообщений сегодня: {today_messages}\n"
-        f"Фото-запросов всего: {vision_requests}\n\n"
+        f"Сообщений за 24 часа: {messages_24h}\n\n"
+        f"Фото-анализов всего: {vision_requests}\n"
+        f"Генераций изображений всего: {image_requests}\n"
+        f"Файлов всего: {file_requests}\n\n"
+        f"ChatGPT сегодня: {gpt_today}\n"
+        f"Claude сегодня: {claude_today}\n"
+        f"Gemini сегодня: {gemini_today}\n\n"
         f"PLUS: {plus_users}\n"
         f"PRO: {pro_users}\n"
         f"VIP: {vip_users}\n\n"
