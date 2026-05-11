@@ -956,6 +956,7 @@ async def admin_handler(message: Message):
         "/stats — общая статистика\n"
         "/users — последние пользователи\n"
         "/payments — платежи\n"
+        "/events — последние события\n"
         "/setplus telegram_id\n"
         "/setpro telegram_id\n"
         "/setvip telegram_id\n"
@@ -991,6 +992,9 @@ async def stats_handler(message: Message):
         total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user'")
         today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at::date = CURRENT_DATE")
         messages_24h = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE role='user' AND created_at >= NOW() - INTERVAL '24 hours'")
+        incoming_text_total = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='incoming_text'")
+        incoming_text_today = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='incoming_text' AND created_at::date = CURRENT_DATE")
+        incoming_text_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='incoming_text' AND created_at >= NOW() - INTERVAL '24 hours'")
         vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
         image_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('ai_image', 'ai_image_edit')")
         file_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_file'")
@@ -1029,6 +1033,9 @@ async def stats_handler(message: Message):
         f"💬 Сообщений всего: {total_messages}\n"
         f"💬 Сообщений сегодня: {today_messages}\n"
         f"💬 Сообщений за 24 часа: {messages_24h}\n"
+        f"📥 Входящих текстов всего: {incoming_text_total}\n"
+        f"📥 Входящих текстов сегодня: {incoming_text_today}\n"
+        f"📥 Входящих текстов за 24 часа: {incoming_text_24h}\n"
         f"📷 Фото-запросов всего: {vision_requests}\n"
         f"🖼 Image-запросов всего: {image_requests}\n"
         f"📎 Файл-запросов всего: {file_requests}\n\n"
@@ -1041,6 +1048,49 @@ async def stats_handler(message: Message):
         f"⭐ Stars получено: {total_stars}\n\n"
         f"🤖 Модели сегодня:\n{model_text}"
     )
+
+
+@dp.message(Command("events"))
+async def events_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT telegram_id, event_type, details, created_at
+            FROM events
+            ORDER BY created_at DESC
+            LIMIT 25
+        """)
+
+        msg_rows = await conn.fetch("""
+            SELECT telegram_id, role, content, created_at
+            FROM messages
+            ORDER BY created_at DESC
+            LIMIT 10
+        """)
+
+    text = "🧾 Последние события\n\n"
+    if not rows:
+        text += "Событий пока нет.\n"
+    for row in rows:
+        details = (row["details"] or "").replace("\n", " ")[:80]
+        text += (
+            f"{row['created_at'].strftime('%d.%m %H:%M:%S')} | "
+            f"{row['telegram_id']} | {row['event_type']} | {details}\n"
+        )
+
+    text += "\n💬 Последние сообщения\n\n"
+    if not msg_rows:
+        text += "Сообщений пока нет."
+    for row in msg_rows:
+        content = (row["content"] or "").replace("\n", " ")[:80]
+        text += (
+            f"{row['created_at'].strftime('%d.%m %H:%M:%S')} | "
+            f"{row['telegram_id']} | {row['role']} | {content}\n"
+        )
+
+    await message.answer(text[:3900])
 
 
 @dp.message(Command("users"))
@@ -1135,6 +1185,7 @@ async def setfree_handler(message: Message):
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     user = await get_or_create_user(message)
+    await log_event(message.from_user.id, "incoming_photo", message.caption or "")
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
@@ -1222,6 +1273,7 @@ async def photo_handler(message: Message):
 @dp.message(F.document)
 async def document_handler(message: Message):
     user = await get_or_create_user(message)
+    await log_event(message.from_user.id, "incoming_document", message.document.file_name if message.document else "")
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
@@ -1331,6 +1383,7 @@ async def chat_handler(message: Message):
         return
 
     user = await get_or_create_user(message)
+    await log_event(message.from_user.id, "incoming_text", (message.text or "")[:300])
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
     if not spam_allowed:
