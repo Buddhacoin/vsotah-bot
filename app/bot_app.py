@@ -146,12 +146,58 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Текстовые AI", callback_data="models_text")],
+            [InlineKeyboardButton(text="🌇 Image AI", callback_data="models_image")],
+            [InlineKeyboardButton(text="🎬 Video AI", callback_data="models_video")],
+            [InlineKeyboardButton(text="👑 VIP AI", callback_data="models_vip")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
+        ]
+    )
+
+
+def models_text_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini", callback_data="set_model_gpt")],
             [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash", callback_data="set_model_gemini")],
             [InlineKeyboardButton(text="✴️ Claude — Sonnet", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
+        ]
+    )
+
+
+def models_image_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="🍌 Nano Banana Pro", callback_data="set_model_nanobanana")],
             [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
-            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
+            [InlineKeyboardButton(text="🎨 Midjourney — скоро", callback_data="model_soon_midjourney")],
+            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
+        ]
+    )
+
+
+def models_video_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎬 Runway Video — скоро", callback_data="model_soon_runway")],
+            [InlineKeyboardButton(text="🎞 Pika Video — скоро", callback_data="model_soon_pika")],
+            [InlineKeyboardButton(text="👑 Открыть VIP", callback_data="tariff_VIP")],
+            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
+        ]
+    )
+
+
+def models_vip_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Что входит в VIP", callback_data="vip_info")],
+            [InlineKeyboardButton(text="💳 Купить VIP", callback_data="tariff_VIP")],
+            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
         ]
     )
 
@@ -161,7 +207,8 @@ def tariffs_menu():
         inline_keyboard=[
             [InlineKeyboardButton(text="⭐ PLUS — 500 запросов / неделя", callback_data="tariff_PLUS")],
             [InlineKeyboardButton(text="💎 PRO — 1400 запросов / неделя", callback_data="tariff_PRO")],
-            [InlineKeyboardButton(text="👑 VIP — безлимит", callback_data="tariff_VIP")],
+            [InlineKeyboardButton(text="👑 VIP — максимум AI", callback_data="tariff_VIP")],
+            [InlineKeyboardButton(text="👑 Почему VIP", callback_data="vip_info")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -318,28 +365,54 @@ def welcome_text():
 def premium_text():
     return """💳 Купить подписку
 
-🟢 FREE
-• ChatGPT — GPT-4o mini
-• Gemini — 2.5 Flash
-• Claude — Sonnet
-• Nano Banana Pro
-• Sora GPT Image
+Выберите тариф под свои задачи. Все покупки проходят через Telegram Stars.
 
+🟢 FREE
 • 15 запросов в день
-• из них 5 Image
 • 105 запросов в неделю
+• до 5 Image-запросов в день
 
 ⭐ PLUS — 500 запросов в неделю
-• Все модели
 • больше лимитов
+• удобно для регулярного общения и работы
 
 💎 PRO — 1400 запросов в неделю
-• Все модели
-• больше лимитов
+• больше запаса на тексты, фото, файлы и изображения
+• подходит для активной ежедневной работы
 
-👑 VIP — безлимит
-• Все модели
-• максимум возможностей"""
+👑 VIP — максимум AI
+• безлимит по основным запросам
+• приоритетный тариф для новых моделей
+• подготовка под Midjourney и Video AI
+• лучший вариант, если нужен полный доступ ко всему VSotah AI"""
+
+
+def vip_info_text():
+    return """👑 VIP — максимальный доступ
+
+VIP нужен для пользователей, которые хотят пользоваться ботом без постоянных ограничений и первыми получать новые AI-возможности.
+
+Что входит сейчас:
+• максимум лимитов
+• все доступные текстовые AI
+• Image AI
+• работа с фото, файлами и голосом
+
+Что готовим дальше для VIP:
+• Midjourney generation
+• минимум 2 Video AI генератора
+• новые модели OpenAI, Claude, Gemini и DeepSeek
+• расширенные лимиты на image/video задачи
+
+VIP должен ощущаться как полный AI-комбайн в кармане."""
+
+
+def coming_soon_model_text(model_title: str):
+    return (
+        f"🚧 {model_title} пока готовится.\n\n"
+        "Мы уже подготовили место в меню, чтобы потом подключить модель без переделки интерфейса.\n\n"
+        "Сейчас можно пользоваться ChatGPT, Claude, Gemini, Nano Banana Pro и Sora GPT Image."
+    )
 
 def channels_text():
     return """🧠 Наши каналы:
@@ -1182,10 +1255,71 @@ async def models_callback(callback: CallbackQuery):
     await log_event(callback.from_user.id, "models_open")
     await safe_edit_or_send(
         callback,
-        "🤖 Выберите нейросеть:\n\n"
-        "Все базовые модели сейчас доступны бесплатно.",
+        "🤖 Выберите раздел AI:\n\n"
+        "Текст, изображения, будущие Video AI и VIP-возможности собраны в одном меню.",
         reply_markup=models_menu(),
     )
+
+
+@dp.callback_query(F.data == "models_text")
+async def models_text_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "models_text_open")
+    await safe_edit_or_send(
+        callback,
+        "📝 Текстовые AI\n\nВыберите нейросеть для общения, работы, идей, анализа и текстов.",
+        reply_markup=models_text_menu(),
+    )
+
+
+@dp.callback_query(F.data == "models_image")
+async def models_image_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "models_image_open")
+    await safe_edit_or_send(
+        callback,
+        "🌇 Image AI\n\nВыберите генератор изображений. Midjourney уже добавлен как будущий раздел, но пока не подключён к API.",
+        reply_markup=models_image_menu(),
+    )
+
+
+@dp.callback_query(F.data == "models_video")
+async def models_video_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "models_video_open")
+    await safe_edit_or_send(
+        callback,
+        "🎬 Video AI\n\nРаздел подготовлен под подключение минимум двух AI-видеогенераторов. Пока API не подключены, кнопки работают как аккуратный preview без ошибок.",
+        reply_markup=models_video_menu(),
+    )
+
+
+@dp.callback_query(F.data == "models_vip")
+async def models_vip_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "models_vip_open")
+    await safe_edit_or_send(callback, vip_info_text(), reply_markup=models_vip_menu())
+
+
+@dp.callback_query(F.data == "vip_info")
+async def vip_info_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "vip_info")
+    await safe_edit_or_send(callback, vip_info_text(), reply_markup=models_vip_menu())
+
+
+@dp.callback_query(F.data.startswith("model_soon_"))
+async def model_soon_callback(callback: CallbackQuery):
+    await callback.answer("Эта модель скоро появится", show_alert=True)
+    model_key = callback.data.replace("model_soon_", "")
+    titles = {
+        "midjourney": "Midjourney",
+        "runway": "Runway Video",
+        "pika": "Pika Video",
+    }
+    title = titles.get(model_key, "Эта модель")
+    await log_event(callback.from_user.id, "model_soon", model_key)
+    await safe_edit_or_send(callback, coming_soon_model_text(title), reply_markup=models_menu())
 
 
 @dp.callback_query(F.data == "earn")
@@ -1260,9 +1394,14 @@ async def tariff_callback(callback: CallbackQuery):
         return
     await log_event(callback.from_user.id, "tariff_select", plan)
     tariff = TARIFFS[plan]
+    tariff_details = {
+        "PLUS": "⭐ PLUS\n\n500 запросов в неделю. Хороший старт, если FREE уже мало.",
+        "PRO": "💎 PRO\n\n1400 запросов в неделю. Для активной ежедневной работы с текстом, файлами, фото и изображениями.",
+        "VIP": "👑 VIP\n\nМаксимальный тариф VSotah AI: безлимит по основным запросам, полный доступ к текущим возможностям и приоритет для будущих Midjourney / Video AI моделей.",
+    }
     await safe_edit_or_send(
         callback,
-        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nВыберите период подписки:",
+        f"{tariff_details.get(plan, tariff['title'])}\n\nВыберите период подписки:",
         reply_markup=period_menu(plan),
     )
 
@@ -2071,9 +2210,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
 
