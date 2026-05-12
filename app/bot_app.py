@@ -180,25 +180,21 @@ def channels_menu():
 
 
 def referral_menu(bot_username: str, user_id: int):
-    referral_link = build_referral_link(bot_username, user_id)
-    share_url = build_telegram_share_url(referral_link)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📨 Пригласить друзей", callback_data="earn_invite")],
             [InlineKeyboardButton(text="🏆 Топ партнёров", callback_data="earn_top")],
             [InlineKeyboardButton(text="📊 Моя статистика", callback_data="earn_stats")],
-            [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
+            [InlineKeyboardButton(text="📤 Текст для пересылки", callback_data="earn_share")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
 
 
 def referral_back_menu(bot_username: str, user_id: int):
-    referral_link = build_referral_link(bot_username, user_id)
-    share_url = build_telegram_share_url(referral_link)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
+            [InlineKeyboardButton(text="📤 Текст для пересылки", callback_data="earn_share")],
             [InlineKeyboardButton(text="← В партнёрку", callback_data="earn")],
             [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
         ]
@@ -1179,6 +1175,20 @@ async def earn_invite_callback(callback: CallbackQuery):
     )
 
 
+@dp.callback_query(F.data == "earn_share")
+async def earn_share_callback(callback: CallbackQuery):
+    await callback.answer("Текст для пересылки отправлен ниже")
+    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    await log_event(callback.from_user.id, "referral_share_text")
+    bot_info = await callback.bot.get_me()
+    referral_link = build_referral_link(bot_info.username, callback.from_user.id)
+    await callback.message.answer(
+        build_invite_text(referral_link),
+        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        link_preview_options=no_preview(),
+    )
+
+
 @dp.callback_query(F.data == "earn_top")
 async def earn_top_callback(callback: CallbackQuery):
     await callback.answer()
@@ -1971,6 +1981,14 @@ async def chat_handler(message: Message):
                 "Попробуйте позже или выберите другую нейросеть.",
                 reply_markup=main_menu(),
             )
+
+
+@dp.callback_query()
+async def unknown_callback(callback: CallbackQuery):
+    try:
+        await callback.answer("Меню обновлено. Если кнопка старая — нажмите /start.")
+    except Exception:
+        pass
 
 
 async def health_handler(request):
