@@ -31,6 +31,7 @@ from app.ai.router import (
     analyze_pdf_images_with_openai,
     file_router,
 )
+from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -56,7 +57,9 @@ TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
+MAX_VOICE_SIZE = int(os.getenv("MAX_VOICE_SIZE", str(20 * 1024 * 1024)))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
+VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -628,6 +631,20 @@ async def download_telegram_document(message: Message) -> tuple[str, bytes]:
     return filename, buffer.getvalue()
 
 
+async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
+    voice = message.voice
+
+    if not voice:
+        raise ValueError("VOICE_NOT_FOUND")
+    if voice.file_size and voice.file_size > MAX_VOICE_SIZE:
+        raise ValueError("VOICE_TOO_LARGE")
+
+    file = await bot.get_file(voice.file_id)
+    buffer = BytesIO()
+    await bot.download_file(file.file_path, destination=buffer)
+    return "voice.ogg", buffer.getvalue()
+
+
 def extract_document_text(filename: str, file_bytes: bytes) -> str:
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
@@ -1020,6 +1037,7 @@ async def stats_handler(message: Message):
         vision_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_vision'")
         image_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('ai_image', 'ai_image_edit')")
         file_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_file'")
+        voice_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_voice'")
         plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
         pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
         vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
@@ -1031,7 +1049,7 @@ async def stats_handler(message: Message):
         model_rows = await conn.fetch("""
             SELECT details AS model, COUNT(*) AS count
             FROM events
-            WHERE event_type IN ('ai_message', 'ai_vision', 'ai_image', 'ai_image_edit', 'ai_file')
+            WHERE event_type IN ('ai_message', 'ai_vision', 'ai_image', 'ai_image_edit', 'ai_file', 'ai_voice')
               AND created_at::date = CURRENT_DATE
             GROUP BY details
             ORDER BY count DESC
@@ -1057,7 +1075,8 @@ async def stats_handler(message: Message):
         f"💬 Сообщений за 24 часа: {messages_24h}\n"
         f"📷 Фото-запросов всего: {vision_requests}\n"
         f"🖼 Image-запросов всего: {image_requests}\n"
-        f"📎 Файл-запросов всего: {file_requests}\n\n"
+        f"📎 Файл-запросов всего: {file_requests}\n"
+        f"🎙 Voice-запросов всего: {voice_requests}\n\n"
         f"⭐ PLUS: {plus_users}\n"
         f"💎 PRO: {pro_users}\n"
         f"👑 VIP: {vip_users}\n\n"
@@ -1361,6 +1380,107 @@ async def document_handler(message: Message):
             )
 
 
+@dp.message(F.voice)
+async def voice_handler(message: Message):
+    user = await get_or_create_user(message)
+    spam_allowed, wait_seconds = await check_spam(message.from_user.id)
+
+    if not spam_allowed:
+        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
+        return
+
+    allowed, reason = await check_limit(user)
+    if not allowed:
+        await log_event(message.from_user.id, "limit_reached", reason)
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        return
+
+    selected_model = user["selected_model"]
+    if selected_model in {"nanobanana", "gptimage"}:
+        await message.answer(
+            "🎙 Для голосового общения выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть».",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if not has_model_access(user["plan"], selected_model):
+        selected_model = "gpt"
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
+        await message.answer(
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+        )
+
+    wait_message = await message.answer("🎙 Слушаю голосовое...")
+
+    try:
+        filename, audio_bytes = await download_telegram_voice(message)
+
+        await wait_message.edit_text("🎧 Распознаю речь...")
+        transcript = await transcribe_voice(audio_bytes, filename)
+
+        if not transcript:
+            await wait_message.edit_text(
+                "⚠️ Не удалось распознать голосовое. Попробуйте записать ещё раз или отправьте текстом.",
+                reply_markup=main_menu(),
+            )
+            return
+
+        await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
+        history = await get_chat_history(message.from_user.id)
+
+        await wait_message.edit_text("🧠 Думаю над ответом...")
+        answer = await ai_router(selected_model, history)
+
+        if not answer:
+            answer = "⚠️ AI вернул пустой ответ. Попробуйте записать вопрос ещё раз."
+
+        await save_message(message.from_user.id, "assistant", answer)
+        await increase_usage(message.from_user.id)
+        await log_event(message.from_user.id, "ai_voice", selected_model)
+
+        response_text = f"🎙 Распознал:\n{transcript}\n\nОтвет:\n{answer}"
+        if len(response_text) <= 3900:
+            await wait_message.edit_text(response_text)
+        else:
+            await wait_message.edit_text(response_text[:3900])
+            for i in range(3900, len(response_text), 3900):
+                await message.answer(response_text[i:i + 3900])
+
+        if VOICE_REPLY_ENABLED:
+            try:
+                audio_reply = await text_to_speech(answer)
+                if audio_reply:
+                    audio = BufferedInputFile(audio_reply, filename="vsotah_voice_reply.mp3")
+                    await message.answer_audio(audio=audio, caption="🔊 Голосовой ответ VSotah AI")
+            except Exception as voice_reply_error:
+                print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
+
+    except ValueError as e:
+        error_code = str(e)
+        if error_code == "VOICE_TOO_LARGE":
+            await wait_message.edit_text("⚠️ Голосовое слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
+        else:
+            await wait_message.edit_text("⚠️ Не удалось скачать голосовое. Попробуйте ещё раз.", reply_markup=main_menu())
+
+    except Exception as e:
+        admin_error = short_error_text(e)
+        print(f"VOICE ERROR SHORT:\n{admin_error}")
+        print(f"VOICE ERROR TRACE:\n{traceback.format_exc()}")
+        await send_ai_error_to_admin(f"⚠️ VOICE AI ERROR | {selected_model} | {admin_error}")
+
+        try:
+            await wait_message.edit_text(
+                "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            await message.answer(
+                "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
+                reply_markup=main_menu(),
+            )
+
+
 @dp.message(F.text)
 async def chat_handler(message: Message):
     if message.text.startswith("/"):
@@ -1540,5 +1660,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
