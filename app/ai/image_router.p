@@ -1,33 +1,238 @@
-import os
+import re
+from dataclasses import dataclass
 from typing import Literal
 
-IMAGE_PROVIDER = os.getenv('IMAGE_PROVIDER', 'openai')
-GPT_IMAGE_MODEL = os.getenv('GPT_IMAGE_MODEL', 'gpt-image-1')
-NANO_BANANA_MODEL = os.getenv('NANO_BANANA_MODEL', 'imagen-4.0-generate-001')
+ImageKind = Literal[
+    "avatar",
+    "logo",
+    "photo",
+    "art",
+    "ui",
+    "meme",
+    "document",
+    "product",
+    "poster",
+    "story",
+    "wallpaper",
+    "unknown",
+]
 
-ImageType = Literal['avatar','photo','art','logo','ui','meme','document','unknown']
+ImageAction = Literal[
+    "generate",
+    "edit",
+    "remove_object",
+    "cleanup",
+    "upscale",
+    "avatar_crop",
+    "logo_enhance",
+    "background_replace",
+]
 
 
-def detect_image_type(prompt: str) -> ImageType:
-    text = (prompt or '').lower()
-    if any(x in text for x in ['logo','логотип']):
-        return 'logo'
-    if any(x in text for x in ['avatar','ава','аватар']):
-        return 'avatar'
-    if any(x in text for x in ['ui','interface','интерфейс']):
-        return 'ui'
-    return 'unknown'
+@dataclass(frozen=True)
+class ImagePlan:
+    action: ImageAction
+    kind: ImageKind
+    aspect_ratio: str
+    openai_size: str
+    quality_notes: str
+    safety_notes: str
 
 
-def enhance_image_prompt(prompt: str) -> str:
-    image_type = detect_image_type(prompt)
+def _text(value: str | None) -> str:
+    return (value or "").strip()
 
-    styles = {
-        'logo': 'minimalistic, premium, cinematic lighting, clean geometry, ultra detailed',
-        'avatar': 'sharp focus, centered composition, detailed face, dramatic lighting',
-        'ui': 'modern ui, glassmorphism, premium mobile app interface',
-        'unknown': 'high quality, cinematic, ultra detailed'
+
+def _lower(value: str | None) -> str:
+    return _text(value).lower()
+
+
+def _has_any(text: str, words: list[str]) -> bool:
+    return any(word in text for word in words)
+
+
+def detect_image_kind(prompt: str | None) -> ImageKind:
+    text = _lower(prompt)
+
+    if _has_any(text, ["логотип", "лого", "logo", "brand mark", "иконка бренда"]):
+        return "logo"
+    if _has_any(text, ["аватар", "ава", "avatar", "profile picture", "юзерпик"]):
+        return "avatar"
+    if _has_any(text, ["интерфейс", "приложение", "app screen", "ui", "ux", "dashboard", "лендинг", "сайт"]):
+        return "ui"
+    if _has_any(text, ["мем", "meme", "смешная картинка"]):
+        return "meme"
+    if _has_any(text, ["постер", "афиша", "обложка", "cover", "poster", "баннер"]):
+        return "poster"
+    if _has_any(text, ["сторис", "story", "reels", "shorts", "тикток", "вертикальное видео"]):
+        return "story"
+    if _has_any(text, ["обои", "wallpaper", "фон", "background"]):
+        return "wallpaper"
+    if _has_any(text, ["товар", "product", "карточка товара", "маркетплейс"]):
+        return "product"
+    if _has_any(text, ["документ", "чек", "таблица", "скрин", "screenshot", "receipt", "document"]):
+        return "document"
+    if _has_any(text, ["фото", "реалист", "realistic", "photorealistic", "камера", "portrait"]):
+        return "photo"
+    if _has_any(text, ["арт", "иллюстрац", "рисунок", "anime", "comic", "painting", "art"]):
+        return "art"
+
+    return "unknown"
+
+
+def detect_image_action(prompt: str | None, has_source_image: bool = False) -> ImageAction:
+    text = _lower(prompt)
+
+    if _has_any(text, ["убери", "удали", "remove", "erase", "без "]):
+        return "remove_object"
+    if _has_any(text, ["фон", "background", "замени фон", "поменяй фон"]):
+        return "background_replace" if has_source_image else "generate"
+    if _has_any(text, ["почисти", "очисти", "убрать мусор", "cleanup", "clean up", "выровняй"]):
+        return "cleanup"
+    if _has_any(text, ["улучши качество", "upscale", "апскейл", "четче", "резче", "hd", "4k"]):
+        return "upscale"
+    if _has_any(text, ["квадратную аву", "аватар", "avatar", "крупным планом"]):
+        return "avatar_crop" if has_source_image else "generate"
+    if _has_any(text, ["логотип", "лого", "logo"]):
+        return "logo_enhance" if has_source_image else "generate"
+
+    return "edit" if has_source_image else "generate"
+
+
+def infer_aspect_ratio(prompt: str | None, kind: ImageKind | None = None) -> str:
+    text = _lower(prompt)
+    kind = kind or detect_image_kind(prompt)
+
+    if _has_any(text, ["640x360", "16:9", "ютуб", "youtube", "баннер", "thumbnail", "превью"]):
+        return "16:9"
+    if _has_any(text, ["9:16", "сторис", "story", "reels", "shorts", "вертикаль", "вертикальная"]):
+        return "9:16"
+    if _has_any(text, ["4:3", "презентац", "presentation"]):
+        return "4:3"
+    if _has_any(text, ["3:4", "портрет", "portrait"]):
+        return "3:4"
+    if _has_any(text, ["квадрат", "square", "1:1", "аватар", "ава"]):
+        return "1:1"
+
+    defaults = {
+        "avatar": "1:1",
+        "logo": "1:1",
+        "ui": "9:16",
+        "poster": "16:9",
+        "story": "9:16",
+        "wallpaper": "16:9",
+        "product": "1:1",
+        "meme": "1:1",
+        "document": "1:1",
+        "photo": "1:1",
+        "art": "1:1",
+        "unknown": "1:1",
+    }
+    return defaults.get(kind, "1:1")
+
+
+def infer_openai_image_size(prompt: str | None) -> str:
+    ratio = infer_aspect_ratio(prompt)
+    if ratio == "16:9":
+        return "1536x1024"
+    if ratio == "9:16":
+        return "1024x1536"
+    return "1024x1024"
+
+
+def infer_gemini_aspect_ratio(prompt: str | None) -> str:
+    ratio = infer_aspect_ratio(prompt)
+    if ratio in {"1:1", "3:4", "4:3", "9:16", "16:9"}:
+        return ratio
+    return "1:1"
+
+
+def build_image_plan(prompt: str | None, has_source_image: bool = False) -> ImagePlan:
+    kind = detect_image_kind(prompt)
+    action = detect_image_action(prompt, has_source_image=has_source_image)
+    aspect_ratio = infer_aspect_ratio(prompt, kind)
+
+    quality_by_kind = {
+        "logo": "premium minimal vector-like mark, clean geometry, memorable silhouette, balanced negative space, no random letters",
+        "avatar": "centered subject, close-up composition, sharp focus, clean background, strong readable silhouette",
+        "ui": "modern premium mobile interface, clean spacing, realistic app layout, readable structure without fake small text",
+        "meme": "clear composition, expressive subject, simple background, no unreadable fake text unless requested",
+        "poster": "cinematic composition, strong focal point, professional lighting, high contrast, clean typography only if requested",
+        "story": "vertical composition, strong central subject, social-media ready framing, clean background",
+        "wallpaper": "wide cinematic composition, depth, atmosphere, high detail, clean edges",
+        "product": "commercial product shot, clean studio lighting, premium background, sharp details",
+        "document": "clean readable layout, high contrast, document-like composition, no fake unreadable text unless requested",
+        "photo": "photorealistic, natural lighting, realistic lens depth, detailed textures",
+        "art": "high quality illustration, strong composition, coherent style, polished details",
+        "unknown": "high quality, coherent composition, detailed subject, clean background, professional lighting",
     }
 
-    return f'{prompt}\n\nStyle: {styles.get(image_type, styles["unknown"])}'
+    safety_notes = (
+        "Follow the user's subject literally. Do not add random captions, watermarks, logos, extra fingers, fake UI text, "
+        "or unrelated objects. Preserve requested colors, composition, and brand words only when explicitly requested."
+    )
+
+    return ImagePlan(
+        action=action,
+        kind=kind,
+        aspect_ratio=aspect_ratio,
+        openai_size=infer_openai_image_size(prompt),
+        quality_notes=quality_by_kind.get(kind, quality_by_kind["unknown"]),
+        safety_notes=safety_notes,
+    )
+
+
+def build_image_generation_prompt(user_prompt: str | None, image_model: str = "image") -> str:
+    original = _text(user_prompt) or "Create a high quality detailed image."
+    plan = build_image_plan(original, has_source_image=False)
+
+    return (
+        f"User request: {original}\n\n"
+        f"Image model: {image_model}\n"
+        f"Detected type: {plan.kind}\n"
+        f"Target aspect ratio: {plan.aspect_ratio}\n"
+        f"Quality direction: {plan.quality_notes}\n"
+        f"Rules: {plan.safety_notes}\n\n"
+        "Create one polished final image. The result must match the user's request literally."
+    )[:3000]
+
+
+def build_image_edit_prompt(user_prompt: str | None) -> str:
+    original = _text(user_prompt) or "Improve this image while keeping the same subject."
+    plan = build_image_plan(original, has_source_image=True)
+
+    action_instructions = {
+        "remove_object": "Remove only the requested object or distraction. Reconstruct the background naturally.",
+        "background_replace": "Replace or improve the background as requested while keeping the main subject unchanged.",
+        "cleanup": "Clean visual noise, stray objects, bad edges, clutter, artifacts, and distracting background elements.",
+        "upscale": "Improve clarity, sharpness, texture, and overall quality without changing the identity or composition.",
+        "avatar_crop": "Create a clean square avatar-style composition with the subject larger and centered.",
+        "logo_enhance": "Enhance the logo shape, symmetry, contrast, and premium look without adding unrelated symbols.",
+        "edit": "Apply the requested edit while preserving the original subject and important details.",
+        "generate": "Apply the requested visual change while preserving the source image context.",
+    }
+
+    return (
+        f"Edit request: {original}\n\n"
+        f"Detected action: {plan.action}\n"
+        f"Detected type: {plan.kind}\n"
+        f"Instruction: {action_instructions.get(plan.action, action_instructions['edit'])}\n"
+        f"Quality direction: {plan.quality_notes}\n"
+        "Preserve the original subject, identity, pose, perspective, and important details unless the user explicitly asks to change them. "
+        f"Rules: {plan.safety_notes}"
+    )[:2500]
+
+
+def image_result_caption(model_key: str, action: str = "generate") -> str:
+    if action == "edit":
+        return "🖼 Готово"
+    if model_key == "nanobanana":
+        return "🍌 Готово"
+    return "🌀 Готово"
+
+
+def image_filename(model_key: str, action: str = "generate") -> str:
+    safe_model = re.sub(r"[^a-zA-Z0-9_-]+", "_", model_key or "image").strip("_") or "image"
+    suffix = "edited" if action == "edit" else "generated"
+    return f"{safe_model}_{suffix}.png"
 
