@@ -338,7 +338,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
     if selected_model in {"nanobanana", "gptimage"}:
         return (
             "📷 Вы сейчас выбрали генерацию изображений.\n\n"
-            "Чтобы задать вопрос по фото, выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть»."
+            "Чтобы задать вопрос по фото, выберите ChatGPT, Claude или Gemini в меню «Выбрать AI»."
         )
 
     system_text = system_prompt(get_personality(selected_model))
@@ -435,7 +435,7 @@ async def enhance_image_edit_prompt(user_prompt: str) -> str:
 
 async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
     if not google_client:
-        return None, "⚠️ Nano Banana пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
+        return None, "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже."
 
     enhanced_prompt = await enhance_image_prompt(prompt, "Nano Banana / Gemini Image")
 
@@ -451,7 +451,7 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
         )
 
         if not response.generated_images:
-            return None, "⚠️ Nano Banana не вернул изображение. Попробуйте другой запрос."
+            return None, "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже."
 
         image_obj = response.generated_images[0].image
 
@@ -462,7 +462,11 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
         image_obj.save(buffer, format="PNG")
         return buffer.getvalue(), image_result_caption("nanobanana")
 
-    return await asyncio.to_thread(run_image_generation)
+    try:
+        return await asyncio.to_thread(run_image_generation)
+    except Exception as e:
+        print(f"NANO BANANA IMAGE ERROR: {short_error_text(e)}")
+        return None, "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже."
 
 
 async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
@@ -611,4 +615,5 @@ async def file_router(selected_model: str, question: str, filename: str, extract
     )
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
     return await ai_router(selected_model, messages)
+
 
