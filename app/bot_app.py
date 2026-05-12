@@ -185,10 +185,7 @@ def referral_menu(bot_username: str, user_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📨 Пригласить друзей", callback_data="earn_invite")],
-            [
-                InlineKeyboardButton(text="🏆 Топ партнёров", callback_data="earn_top"),
-                InlineKeyboardButton(text="🎁 Мои бонусы", callback_data="earn_bonuses"),
-            ],
+            [InlineKeyboardButton(text="🏆 Топ партнёров", callback_data="earn_top")],
             [InlineKeyboardButton(text="📊 Моя статистика", callback_data="earn_stats")],
             [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
@@ -1065,6 +1062,12 @@ async def start_handler(message: Message):
     if now - last < 2:
         return
     recent_starts[message.from_user.id] = now
+
+    # Убираем сообщение пользователя «/start», чтобы после приветствия не оставался дубль команды в чате.
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     referrer_id = parse_referral_code(message.text or "")
     await track_referral_start(message.from_user.id, referrer_id)
