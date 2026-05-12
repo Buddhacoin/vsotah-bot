@@ -107,8 +107,9 @@ TARIFFS = {
 REFERRAL_REWARDS = {
     1: {"type": "requests", "amount": 50, "title": "+50 запросов"},
     3: {"type": "plan_days", "plan": "PLUS", "days": 3, "title": "+3 дня PLUS"},
-    10: {"type": "plan_days", "plan": "PRO", "days": 7, "title": "+7 дней PRO"},
-    25: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус на 30 дней"},
+    10: {"type": "plan_days", "plan": "PRO", "days": 5, "title": "+5 дней PRO"},
+    25: {"type": "plan_days", "plan": "VIP", "days": 7, "title": "VIP статус на 7 дней"},
+    100: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус на 30 дней"},
 }
 
 SPAM_WINDOW_SECONDS = 8
@@ -121,6 +122,16 @@ dp = Dispatcher()
 
 db_pool = None
 recent_starts = {}
+BOT_USERNAME_CACHE = None
+
+
+async def get_bot_username(bot_obj: Bot) -> str:
+    global BOT_USERNAME_CACHE
+    if BOT_USERNAME_CACHE:
+        return BOT_USERNAME_CACHE
+    bot_info = await bot_obj.get_me()
+    BOT_USERNAME_CACHE = bot_info.username
+    return BOT_USERNAME_CACHE
 
 
 def no_preview():
@@ -184,10 +195,7 @@ def referral_menu(bot_username: str, user_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📨 Пригласить друзей", callback_data="earn_invite")],
-            [
-                InlineKeyboardButton(text="🏆 Топ партнёров", callback_data="earn_top"),
-                InlineKeyboardButton(text="🎁 Мои бонусы", callback_data="earn_bonuses"),
-            ],
+            [InlineKeyboardButton(text="🏆 Топ партнёров", callback_data="earn_top")],
             [InlineKeyboardButton(text="📊 Моя статистика", callback_data="earn_stats")],
             [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
@@ -628,8 +636,8 @@ async def get_referral_stats(telegram_id: int) -> dict:
 
 
 async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
-    bot_info = await bot_obj.get_me()
-    referral_link = build_referral_link(bot_info.username, user_id)
+    bot_username = await get_bot_username(bot_obj)
+    referral_link = build_referral_link(bot_username, user_id)
     stats = await get_referral_stats(user_id)
 
     return (
@@ -639,20 +647,20 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         "📊 Твоя статистика:\n"
         f"• Приглашено: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• Бонусов ожидает: {stats['pending_rewards']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Бонусы за приглашения:\n"
         "• 1 друг → +50 запросов\n"
         "• 3 друга → +3 дня PLUS\n"
-        "• 10 друзей → +7 дней PRO\n"
-        "• 25 друзей → VIP статус\n\n"
-        "⭐ Stars/денежные выплаты подключим позже, когда партнёрка пройдёт тест."
+        "• 10 друзей → +5 дней PRO\n"
+        "• 25 друзей → VIP статус 7 дней\n"
+        "• 100 друзей → VIP статус 30 дней\n\n"
+        "Бонусы выдаются автоматически внутри бота."
     )
 
 
 async def build_referral_invite_text(bot_obj: Bot, user_id: int) -> str:
-    bot_info = await bot_obj.get_me()
-    referral_link = build_referral_link(bot_info.username, user_id)
+    bot_username = await get_bot_username(bot_obj)
+    referral_link = build_referral_link(bot_username, user_id)
     invite_text = build_invite_text(referral_link)
     return (
         "📨 Пригласить друзей\n\n"
@@ -667,42 +675,17 @@ async def build_referral_stats_text(user_id: int) -> str:
         "📊 Моя статистика партнёрки\n\n"
         f"• Приглашено всего: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• Бонусов ожидает: {stats['pending_rewards']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
-        "Чем больше друзей покупают подписку, тем быстрее открываются следующие бонусы."
+        "Бонусы открываются по количеству приглашённых друзей, которые купили подписку."
     )
 
 
 async def build_referral_bonuses_text(user_id: int) -> str:
     stats = await get_referral_stats(user_id)
-
-    async with db_pool.acquire() as conn:
-        rewards = await conn.fetch("""
-            SELECT milestone, reward_type, reward_value, created_at
-            FROM referral_rewards
-            WHERE referrer_id=$1
-            ORDER BY milestone
-        """, user_id)
-
-    milestones_text = []
-    paid = stats["paid"]
-    for milestone, reward in sorted(REFERRAL_REWARDS.items()):
-        status = "✅ получено" if paid >= milestone else f"ещё {milestone - paid}"
-        milestones_text.append(f"• {milestone} оплат(а) → {reward['title']} — {status}")
-
-    history_text = ""
-    if rewards:
-        history_lines = []
-        for row in rewards:
-            created = row["created_at"].strftime("%d.%m.%Y") if row["created_at"] else ""
-            history_lines.append(f"• Порог {row['milestone']} — начислено {created}")
-        history_text = "\n\n🎁 Уже начислено:\n" + "\n".join(history_lines)
-
     return (
-        "🎁 Мои бонусы\n\n"
-        "Бонусы начисляются автоматически, когда приглашённые друзья покупают подписку.\n\n"
-        + "\n".join(milestones_text)
-        + history_text
+        "🎁 Бонусы\n\n"
+        f"Сейчас приглашено: {stats['invited']}\n"
+        f"Бонусов получено: {stats['rewards_count']}"
     )
 
 
@@ -1113,10 +1096,10 @@ async def account_command(message: Message):
 async def referral_command(message: Message):
     await get_or_create_user(message)
     await log_event(message.from_user.id, "referral_open")
-    bot_info = await message.bot.get_me()
+    bot_username = await get_bot_username(message.bot)
     await message.answer(
         await build_referral_text(message.bot, message.from_user.id),
-        reply_markup=referral_menu(bot_info.username, message.from_user.id),
+        reply_markup=referral_menu(bot_username, message.from_user.id),
     )
 
 
@@ -1193,11 +1176,11 @@ async def earn_callback(callback: CallbackQuery):
     await callback.answer()
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_open")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_text(callback.bot, callback.from_user.id),
-        reply_markup=referral_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_menu(bot_username, callback.from_user.id),
     )
 
 
@@ -1206,11 +1189,11 @@ async def earn_invite_callback(callback: CallbackQuery):
     await callback.answer()
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_invite")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_invite_text(callback.bot, callback.from_user.id),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
@@ -1218,11 +1201,11 @@ async def earn_invite_callback(callback: CallbackQuery):
 async def earn_top_callback(callback: CallbackQuery):
     await callback.answer()
     await log_event(callback.from_user.id, "referral_top")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_leaderboard_text(),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
@@ -1231,11 +1214,11 @@ async def earn_bonuses_callback(callback: CallbackQuery):
     await callback.answer()
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_bonuses")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
-        await build_referral_bonuses_text(callback.from_user.id),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        await build_referral_stats_text(callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
@@ -1244,11 +1227,11 @@ async def earn_stats_callback(callback: CallbackQuery):
     await callback.answer()
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_stats")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_stats_text(callback.from_user.id),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
@@ -2071,7 +2054,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
