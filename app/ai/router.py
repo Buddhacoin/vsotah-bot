@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 from io import BytesIO
+from typing import Any, Callable, Coroutine
 
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
@@ -18,12 +19,14 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini")
-ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
-ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
+# Модели можно менять через Railway Variables без правки кода.
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-3-5-sonnet-latest")
+ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-3-5-sonnet-latest")
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
+DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-chat")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
@@ -35,22 +38,39 @@ VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 google_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
 
-deepseek_client = AsyncOpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com",
-) if DEEPSEEK_API_KEY else None
+deepseek_client = (
+    AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+    if DEEPSEEK_API_KEY
+    else None
+)
+
+
+class ProviderUnavailable(Exception):
+    pass
 
 
 def short_error_text(error: Exception) -> str:
     return str(error).replace("\n", " ")[:1200]
 
 
-def normalize_anthropic_messages(messages: list[dict]):
-    result = []
+def _safe_text(value: Any) -> str:
+    return (value or "").strip()
+
+
+def _extract_anthropic_text(response: Any) -> str:
+    parts: list[str] = []
+    for block in getattr(response, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", ""))
+    return "\n".join(part for part in parts if part).strip()
+
+
+def normalize_anthropic_messages(messages: list[dict]) -> list[dict]:
+    result: list[dict] = []
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content", "")
@@ -65,8 +85,18 @@ def normalize_anthropic_messages(messages: list[dict]):
     return result
 
 
+def normalize_openai_messages(messages: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role in {"system", "user", "assistant"} and content:
+            result.append({"role": role, "content": content})
+    return result
+
+
 def messages_to_plain_text(messages: list[dict]) -> str:
-    lines = []
+    lines: list[str] = []
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
@@ -75,132 +105,150 @@ def messages_to_plain_text(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def provider_order(selected_model: str, task: str = "text") -> list[str]:
+    """
+    AI Router 3.0: основной провайдер зависит от выбранной модели,
+    дальше идут fallback-провайдеры, если API временно недоступен.
+    """
+    selected_model = (selected_model or "gpt").lower()
 
-async def ai_router(selected_model: str, messages: list[dict]):
+    if task == "vision":
+        orders = {
+            "gpt": ["openai", "gemini", "anthropic"],
+            "claude": ["anthropic", "openai", "gemini"],
+            "gemini": ["gemini", "openai", "anthropic"],
+            "deepseek": ["openai", "gemini", "anthropic"],
+        }
+        return orders.get(selected_model, ["openai", "gemini", "anthropic"])
+
+    orders = {
+        "gpt": ["openai", "gemini", "anthropic", "deepseek"],
+        "claude": ["anthropic", "openai", "gemini", "deepseek"],
+        "gemini": ["gemini", "openai", "anthropic", "deepseek"],
+        "deepseek": ["deepseek", "openai", "gemini", "anthropic"],
+    }
+    return orders.get(selected_model, ["openai", "gemini", "anthropic", "deepseek"])
+
+
+async def run_with_fallback(
+    providers: list[str],
+    calls: dict[str, Callable[[], Coroutine[Any, Any, str]]],
+    task_name: str,
+) -> str:
+    errors: list[str] = []
+
+    for provider in providers:
+        call = calls.get(provider)
+        if not call:
+            continue
+        try:
+            result = await asyncio.wait_for(call(), timeout=AI_TIMEOUT_SECONDS)
+            result = clean_ai_answer(_safe_text(result))
+            if result:
+                if errors:
+                    print(f"AI ROUTER FALLBACK OK | task={task_name} | provider={provider} | previous={'; '.join(errors)}")
+                return result
+            errors.append(f"{provider}: empty response")
+        except ProviderUnavailable as e:
+            errors.append(f"{provider}: {short_error_text(e)}")
+        except Exception as e:
+            errors.append(f"{provider}: {short_error_text(e)}")
+            print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | {short_error_text(e)}")
+
+    print(f"AI ROUTER ALL FAILED | task={task_name} | {'; '.join(errors)}")
+    return (
+        "⚠️ Сейчас нейросети временно недоступны.\n\n"
+        "Попробуйте ещё раз чуть позже или выберите другую нейросеть в меню."
+    )
+
+
+async def openai_chat(messages: list[dict], model: str, max_tokens: int, temperature: float = 0.45) -> str:
+    if not openai_client:
+        raise ProviderUnavailable("OPENAI_API_KEY не задан")
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_completion_tokens=max_tokens,
+        )
+    except TypeError:
+        # Совместимость со старыми/другими OpenAI-compatible моделями.
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    return _safe_text(response.choices[0].message.content)
+
+
+async def deepseek_chat(messages: list[dict], max_tokens: int, temperature: float = 0.45) -> str:
+    if not deepseek_client:
+        raise ProviderUnavailable("DEEPSEEK_API_KEY не задан")
+
+    response = await deepseek_client.chat.completions.create(
+        model=DEEPSEEK_TEXT_MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return _safe_text(response.choices[0].message.content)
+
+
+async def anthropic_chat(system_text: str, messages: list[dict], model: str, max_tokens: int, temperature: float = 0.45) -> str:
+    if not anthropic_client:
+        raise ProviderUnavailable("ANTHROPIC_API_KEY не задан")
+
+    response = await anthropic_client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system_text,
+        messages=normalize_anthropic_messages(messages),
+    )
+    return _extract_anthropic_text(response)
+
+
+async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str:
+    if not google_client:
+        raise ProviderUnavailable("GOOGLE_API_KEY не задан")
+
+    prompt = f"{system_text}\n\nКраткая память диалога:\n{messages_to_plain_text(messages)}"
+
+    def run_gemini() -> str:
+        response = google_client.models.generate_content(
+            model=model,
+            contents=prompt,
+        )
+        return getattr(response, "text", "") or ""
+
+    return await asyncio.to_thread(run_gemini)
+
+
+async def ai_router(selected_model: str, messages: list[dict]) -> str:
     memory = build_memory(messages, limit=TEXT_HISTORY_LIMIT)
     system_text = system_prompt(get_personality(selected_model))
+    openai_messages = normalize_openai_messages([{"role": "system", "content": system_text}, *memory])
 
-    if selected_model == "claude":
-        if not anthropic_client:
-            return "⚠️ Claude пока не подключён. Администратору нужно добавить ANTHROPIC_API_KEY в Railway."
-
-        response = await anthropic_client.messages.create(
-            model=ANTHROPIC_TEXT_MODEL,
-            max_tokens=TEXT_MAX_TOKENS,
-            temperature=0.45,
-            system=system_text,
-            messages=normalize_anthropic_messages(memory),
-        )
-        parts = []
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                parts.append(block.text)
-        return clean_ai_answer("\n".join(parts).strip())
-
-    if selected_model == "gemini":
-        if not google_client:
-            return "⚠️ Gemini пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
-
-        prompt = f"{system_text}\n\nКраткая память диалога:\n{messages_to_plain_text(memory)}"
-
-        def run_gemini():
-            response = google_client.models.generate_content(
-                model=GEMINI_TEXT_MODEL,
-                contents=prompt,
-            )
-            return getattr(response, "text", "") or ""
-
-        return clean_ai_answer((await asyncio.to_thread(run_gemini)).strip())
-
-    if selected_model == "deepseek" and deepseek_client:
-        full_messages = [{"role": "system", "content": system_text}, *memory]
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=full_messages,
-            temperature=0.45,
-        )
-        return clean_ai_answer(response.choices[0].message.content)
-
-    full_messages = [{"role": "system", "content": system_text}, *memory]
-    response = await asyncio.wait_for(
-        client.chat.completions.create(
-            model=OPENAI_TEXT_MODEL,
-            messages=full_messages,
-            temperature=0.45,
-            max_completion_tokens=TEXT_MAX_TOKENS,
-        ),
-        timeout=AI_TIMEOUT_SECONDS,
-    )
-    return clean_ai_answer(response.choices[0].message.content)
+    calls = {
+        "openai": lambda: openai_chat(openai_messages, OPENAI_TEXT_MODEL, TEXT_MAX_TOKENS, 0.45),
+        "anthropic": lambda: anthropic_chat(system_text, memory, ANTHROPIC_TEXT_MODEL, TEXT_MAX_TOKENS, 0.45),
+        "gemini": lambda: gemini_chat(system_text, memory, GEMINI_TEXT_MODEL),
+        "deepseek": lambda: deepseek_chat(openai_messages, TEXT_MAX_TOKENS, 0.45),
+    }
+    return await run_with_fallback(provider_order(selected_model, "text"), calls, f"text:{selected_model}")
 
 
-async def vision_router(selected_model: str, question: str, image_bytes: bytes, history: list[dict]):
-    system_text = system_prompt(get_personality(selected_model))
-    question = question.strip() or "Что изображено на фото? Опиши подробно и помоги пользователю."
+async def openai_vision(system_text: str, question: str, image_bytes: bytes, history: list[dict]) -> str:
+    if not openai_client:
+        raise ProviderUnavailable("OPENAI_API_KEY не задан")
+
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    openai_messages: list[dict] = [{"role": "system", "content": system_text}]
 
-    if selected_model == "claude":
-        if not anthropic_client:
-            return "⚠️ Claude Vision пока не подключён. Администратору нужно добавить ANTHROPIC_API_KEY в Railway."
-
-        response = await anthropic_client.messages.create(
-            model=ANTHROPIC_VISION_MODEL,
-            max_tokens=VISION_MAX_TOKENS,
-            temperature=0.5,
-            system=system_text,
-            messages=[
-                *normalize_anthropic_messages(history[-VISION_HISTORY_LIMIT:]),
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
-                            },
-                        },
-                        {"type": "text", "text": question},
-                    ],
-                },
-            ],
-        )
-        parts = []
-        for block in response.content:
-            if getattr(block, "type", None) == "text":
-                parts.append(block.text)
-        return clean_ai_answer("\n".join(parts).strip())
-
-    if selected_model == "gemini":
-        if not google_client:
-            return "⚠️ Gemini Vision пока не подключён. Администратору нужно добавить GOOGLE_API_KEY в Railway."
-
-        prompt = (
-            f"{system_text}\n\n"
-            f"Краткая история диалога:\n{messages_to_plain_text(history[-VISION_HISTORY_LIMIT:])}\n\n"
-            f"Вопрос пользователя к изображению: {question}"
-        )
-
-        def run_gemini_vision():
-            response = google_client.models.generate_content(
-                model=GEMINI_VISION_MODEL,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                ],
-            )
-            return getattr(response, "text", "") or ""
-
-        return clean_ai_answer((await asyncio.to_thread(run_gemini_vision)).strip())
-
-    if selected_model in {"nanobanana", "gptimage"}:
-        return (
-            "📷 Вы сейчас выбрали генерацию изображений.\n\n"
-            "Чтобы задать вопрос по фото, выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть»."
-        )
-
-    openai_messages = [{"role": "system", "content": system_text}]
     for msg in history[-VISION_HISTORY_LIMIT:]:
         if msg.get("role") in {"user", "assistant"} and msg.get("content"):
             openai_messages.append({"role": msg["role"], "content": msg["content"]})
@@ -221,16 +269,79 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
         }
     )
 
-    response = await asyncio.wait_for(
-        client.chat.completions.create(
-            model=OPENAI_VISION_MODEL,
-            messages=openai_messages,
-            temperature=0.4,
-            max_completion_tokens=VISION_MAX_TOKENS,
-        ),
-        timeout=AI_TIMEOUT_SECONDS,
+    return await openai_chat(openai_messages, OPENAI_VISION_MODEL, VISION_MAX_TOKENS, 0.4)
+
+
+async def anthropic_vision(system_text: str, question: str, image_bytes: bytes, history: list[dict]) -> str:
+    if not anthropic_client:
+        raise ProviderUnavailable("ANTHROPIC_API_KEY не задан")
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    response = await anthropic_client.messages.create(
+        model=ANTHROPIC_VISION_MODEL,
+        max_tokens=VISION_MAX_TOKENS,
+        temperature=0.5,
+        system=system_text,
+        messages=[
+            *normalize_anthropic_messages(history[-VISION_HISTORY_LIMIT:]),
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_b64,
+                        },
+                    },
+                    {"type": "text", "text": question},
+                ],
+            },
+        ],
     )
-    return clean_ai_answer(response.choices[0].message.content)
+    return _extract_anthropic_text(response)
+
+
+async def gemini_vision(system_text: str, question: str, image_bytes: bytes, history: list[dict]) -> str:
+    if not google_client:
+        raise ProviderUnavailable("GOOGLE_API_KEY не задан")
+
+    prompt = (
+        f"{system_text}\n\n"
+        f"Краткая история диалога:\n{messages_to_plain_text(history[-VISION_HISTORY_LIMIT:])}\n\n"
+        f"Вопрос пользователя к изображению: {question}"
+    )
+
+    def run_gemini_vision() -> str:
+        response = google_client.models.generate_content(
+            model=GEMINI_VISION_MODEL,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            ],
+        )
+        return getattr(response, "text", "") or ""
+
+    return await asyncio.to_thread(run_gemini_vision)
+
+
+async def vision_router(selected_model: str, question: str, image_bytes: bytes, history: list[dict]) -> str:
+    if selected_model in {"nanobanana", "gptimage"}:
+        return (
+            "📷 Вы сейчас выбрали генерацию изображений.\n\n"
+            "Чтобы задать вопрос по фото, выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть»."
+        )
+
+    system_text = system_prompt(get_personality(selected_model))
+    question = question.strip() or "Что изображено на фото? Опиши подробно и помоги пользователю."
+
+    calls = {
+        "openai": lambda: openai_vision(system_text, question, image_bytes, history),
+        "anthropic": lambda: anthropic_vision(system_text, question, image_bytes, history),
+        "gemini": lambda: gemini_vision(system_text, question, image_bytes, history),
+    }
+    return await run_with_fallback(provider_order(selected_model, "vision"), calls, f"vision:{selected_model}")
 
 
 async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> str:
@@ -255,8 +366,10 @@ async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> 
     )
 
     try:
+        if not openai_client:
+            raise ProviderUnavailable("OPENAI_API_KEY не задан")
         response = await asyncio.wait_for(
-            client.chat.completions.create(
+            openai_client.chat.completions.create(
                 model=OPENAI_TEXT_MODEL,
                 messages=[
                     {"role": "system", "content": system},
@@ -291,8 +404,10 @@ async def enhance_image_edit_prompt(user_prompt: str) -> str:
     )
 
     try:
+        if not openai_client:
+            raise ProviderUnavailable("OPENAI_API_KEY не задан")
         response = await asyncio.wait_for(
-            client.chat.completions.create(
+            openai_client.chat.completions.create(
                 model=OPENAI_TEXT_MODEL,
                 messages=[
                     {"role": "system", "content": system},
@@ -320,7 +435,7 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
 
     enhanced_prompt = await enhance_image_prompt(prompt, "Nano Banana / Gemini Image")
 
-    def run_image_generation():
+    def run_image_generation() -> tuple[bytes | None, str]:
         response = google_client.models.generate_images(
             model=NANO_BANANA_MODEL,
             prompt=enhanced_prompt,
@@ -347,6 +462,9 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
 
 
 async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
+    if not openai_client:
+        return None, "⚠️ Sora GPT Image пока не подключён. Администратору нужно добавить OPENAI_API_KEY в Railway."
+
     def normalize_b64(value: str) -> bytes:
         if value.startswith("data:image"):
             value = value.split(",", 1)[1]
@@ -354,7 +472,7 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
 
     enhanced_prompt = await enhance_image_prompt(prompt, "Sora GPT Image / OpenAI Image")
 
-    response = await client.images.generate(
+    response = await openai_client.images.generate(
         model=GPT_IMAGE_MODEL,
         prompt=enhanced_prompt,
         size="1024x1024",
@@ -370,6 +488,9 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
 
 
 async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None, str]:
+    if not openai_client:
+        return None, "⚠️ Редактирование изображений пока не подключено. Администратору нужно добавить OPENAI_API_KEY в Railway."
+
     def normalize_b64(value: str) -> bytes:
         if value.startswith("data:image"):
             value = value.split(",", 1)[1]
@@ -381,9 +502,7 @@ async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None,
     image_file.name = "input.png"
 
     # В текущей версии OpenAI Images API метод edit не принимает quality.
-    # quality оставляем только для generate, иначе будет ошибка:
-    # AsyncImages.edit() got an unexpected keyword argument 'quality'
-    response = await client.images.edit(
+    response = await openai_client.images.edit(
         model=GPT_IMAGE_MODEL,
         image=image_file,
         prompt=enhanced_prompt,
@@ -420,19 +539,28 @@ def render_pdf_pages_to_images(file_bytes: bytes, max_pages: int = 3) -> list[by
     return images
 
 
-async def analyze_pdf_images_with_openai(question: str, filename: str, file_bytes: bytes, history: list[dict]) -> str:
+async def analyze_pdf_images_with_openai(
+    question: str,
+    filename: str,
+    file_bytes: bytes,
+    history: list[dict],
+    selected_model: str = "gpt",
+) -> str:
     """Fallback для PDF без извлекаемого текста: сканы, чеки, регистрации, картинки внутри PDF."""
     page_images = await asyncio.to_thread(render_pdf_pages_to_images, file_bytes, 3)
     if not page_images:
         return ""
 
+    if not openai_client:
+        return ""
+
     question = question.strip() or "Проанализируй PDF, прочитай видимый текст и выдели главное."
-    content = [
+    content: list[dict] = [
         {
             "type": "text",
             "text": (
                 f"Пользователь отправил PDF-файл: {filename}.\n"
-                f"PDF не содержит обычного текстового слоя или плохо читается как текст, поэтому ниже страницы как изображения.\n\n"
+                "PDF не содержит обычного текстового слоя или плохо читается как текст, поэтому ниже страницы как изображения.\n\n"
                 f"Задача пользователя: {question}\n\n"
                 "Прочитай всё, что видно на страницах, и ответь по делу."
             ),
@@ -451,26 +579,32 @@ async def analyze_pdf_images_with_openai(question: str, filename: str, file_byte
             }
         )
 
-    openai_messages = [{"role": "system", "content": system_prompt(get_personality(selected_model))}]
+    system_text = system_prompt(get_personality(selected_model))
+    openai_messages: list[dict] = [{"role": "system", "content": system_text}]
     for msg in history[-VISION_HISTORY_LIMIT:]:
         if msg.get("role") in {"user", "assistant"} and msg.get("content"):
             openai_messages.append({"role": msg["role"], "content": msg["content"]})
     openai_messages.append({"role": "user", "content": content})
 
-    response = await asyncio.wait_for(
-        client.chat.completions.create(
-            model=OPENAI_VISION_MODEL,
-            messages=openai_messages,
-            temperature=0.4,
-            max_completion_tokens=VISION_MAX_TOKENS,
-        ),
-        timeout=AI_TIMEOUT_SECONDS,
-    )
-    return clean_ai_answer(response.choices[0].message.content or "")
+    try:
+        response = await asyncio.wait_for(
+            openai_client.chat.completions.create(
+                model=OPENAI_VISION_MODEL,
+                messages=openai_messages,
+                temperature=0.4,
+                max_completion_tokens=VISION_MAX_TOKENS,
+            ),
+            timeout=AI_TIMEOUT_SECONDS,
+        )
+        return clean_ai_answer(response.choices[0].message.content or "")
+    except Exception as e:
+        print(f"PDF VISION ERROR: {short_error_text(e)}")
+        return ""
 
 
-async def file_router(selected_model: str, question: str, filename: str, extracted_text: str, history: list[dict]):
+async def file_router(selected_model: str, question: str, filename: str, extracted_text: str, history: list[dict]) -> str:
     question = question.strip() or "Проанализируй файл, сделай краткое резюме и выдели главное."
+    extracted_text = (extracted_text or "")[:FILE_TEXT_LIMIT]
     content = (
         f"Пользователь отправил файл: {filename}\n\n"
         f"Вопрос пользователя: {question}\n\n"
@@ -478,6 +612,4 @@ async def file_router(selected_model: str, question: str, filename: str, extract
     )
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
     return await ai_router(selected_model, messages)
-
-
 
