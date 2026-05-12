@@ -112,6 +112,21 @@ REFERRAL_REWARDS = {
     100: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус на 30 дней"},
 }
 
+
+def referral_reward_title(milestone: int, reward_type: str | None = None, reward_value: str | None = None) -> str:
+    reward = REFERRAL_REWARDS.get(int(milestone))
+    if reward:
+        return reward["title"]
+
+    if reward_type == "requests" and reward_value:
+        return f"+{reward_value} запросов"
+
+    if reward_type == "plan_days" and reward_value and ":" in reward_value:
+        plan, days = reward_value.split(":", 1)
+        return f"+{days} дней {plan}"
+
+    return "бонус"
+
 SPAM_WINDOW_SECONDS = 8
 SPAM_MAX_MESSAGES = 5
 SPAM_BLOCK_SECONDS = 60
@@ -444,6 +459,8 @@ async def init_db():
         await conn.execute("ALTER TABLE referrals ALTER COLUMN status SET DEFAULT 'joined';")
         await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_status TEXT DEFAULT 'pending';")
         await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP NULL;")
+        await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'start_link';")
+        await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS abuse_flags TEXT DEFAULT '';")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS referral_rewards (
@@ -456,7 +473,21 @@ async def init_db():
                 UNIQUE(referrer_id, milestone)
             );
         """)
+        await conn.execute("ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS reward_title TEXT;")
+        await conn.execute("ALTER TABLE referral_rewards ADD COLUMN IF NOT EXISTS source_count INTEGER DEFAULT 0;")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_referrer_id ON referral_rewards(referrer_id);")
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_abuse_events (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT,
+                referred_id BIGINT,
+                event_type TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referral_abuse_referrer_id ON referral_abuse_events(referrer_id);")
 
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
@@ -473,27 +504,60 @@ async def log_event(telegram_id: int | None, event_type: str, details: str = "")
 
 
 async def track_referral_start(referred_id: int, referrer_id: int | None):
-    if not referrer_id or referrer_id == referred_id:
+    if not referrer_id:
+        return False
+
+    if referrer_id == referred_id:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO referral_abuse_events (referrer_id, referred_id, event_type, details) VALUES ($1, $2, $3, $4)",
+                    referrer_id,
+                    referred_id,
+                    "self_ref",
+                    "user tried to invite himself",
+                )
+            await log_event(referred_id, "referral_self_ref", str(referrer_id))
+        except Exception:
+            pass
         return False
 
     try:
         async with db_pool.acquire() as conn:
             existing_user = await conn.fetchrow("SELECT telegram_id FROM users WHERE telegram_id=$1", referred_id)
             if existing_user:
+                await conn.execute(
+                    "INSERT INTO referral_abuse_events (referrer_id, referred_id, event_type, details) VALUES ($1, $2, $3, $4)",
+                    referrer_id,
+                    referred_id,
+                    "existing_user",
+                    "start link opened by existing user",
+                )
                 return False
 
-            await conn.execute("""
-                INSERT INTO referrals (referrer_id, referred_id, status)
-                VALUES ($1, $2, 'joined')
+            inserted = await conn.fetchrow("""
+                INSERT INTO referrals (referrer_id, referred_id, status, source)
+                VALUES ($1, $2, 'joined', 'start_link')
                 ON CONFLICT (referred_id) DO NOTHING
+                RETURNING id
             """, referrer_id, referred_id)
 
+            if not inserted:
+                await conn.execute(
+                    "INSERT INTO referral_abuse_events (referrer_id, referred_id, event_type, details) VALUES ($1, $2, $3, $4)",
+                    referrer_id,
+                    referred_id,
+                    "duplicate_referral",
+                    "referred user already has referrer",
+                )
+                return False
+
         await log_event(referred_id, "referral_joined", str(referrer_id))
+        await process_referral_rewards(referrer_id)
         return True
     except Exception as e:
         print(f"REFERRAL TRACK ERROR: {short_error_text(e)}")
         return False
-
 
 async def apply_plan_days_bonus(telegram_id: int, bonus_plan: str, days: int):
     bonus_plan = (bonus_plan or "PLUS").upper()
@@ -523,20 +587,22 @@ async def apply_plan_days_bonus(telegram_id: int, bonus_plan: str, days: int):
         """, telegram_id, final_plan, base_until + timedelta(days=days))
 
 
-async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict) -> bool:
+async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict, source_count: int) -> bool:
     reward_type = reward["type"]
     if reward_type == "requests":
         reward_value = str(reward["amount"])
     else:
         reward_value = f"{reward['plan']}:{reward['days']}"
 
+    reward_title = reward.get("title") or referral_reward_title(milestone, reward_type, reward_value)
+
     async with db_pool.acquire() as conn:
         inserted = await conn.fetchrow("""
-            INSERT INTO referral_rewards (referrer_id, milestone, reward_type, reward_value)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO referral_rewards (referrer_id, milestone, reward_type, reward_value, reward_title, source_count)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (referrer_id, milestone) DO NOTHING
             RETURNING id
-        """, referrer_id, milestone, reward_type, reward_value)
+        """, referrer_id, milestone, reward_type, reward_value, reward_title, source_count)
 
         if not inserted:
             return False
@@ -548,22 +614,22 @@ async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict) 
                 WHERE telegram_id=$1
             """, referrer_id, int(reward["amount"]))
 
-    if reward_type == "plan_days":
-        await apply_plan_days_bonus(referrer_id, reward["plan"], int(reward["days"]))
-
-    async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE referrals
             SET reward_status='rewarded'
-            WHERE id IN (
-                SELECT id FROM referrals
-                WHERE referrer_id=$1 AND status='paid'
-                ORDER BY paid_at NULLS LAST, created_at
-                LIMIT $2
-            )
+            WHERE referrer_id=$1
+              AND id IN (
+                  SELECT id FROM referrals
+                  WHERE referrer_id=$1
+                  ORDER BY created_at
+                  LIMIT $2
+              )
         """, referrer_id, milestone)
 
-    await log_event(referrer_id, "referral_reward", f"{milestone}: {reward.get('title', reward_type)}")
+    if reward_type == "plan_days":
+        await apply_plan_days_bonus(referrer_id, reward["plan"], int(reward["days"]))
+
+    await log_event(referrer_id, "referral_reward", f"{milestone}: {reward_title}")
     return True
 
 
@@ -574,15 +640,15 @@ async def process_referral_rewards(referrer_id: int) -> list[str]:
     granted: list[str] = []
     try:
         async with db_pool.acquire() as conn:
-            paid_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='paid'",
+            invited_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1",
                 referrer_id,
             )
 
-        paid_count = paid_count or 0
+        invited_count = invited_count or 0
         for milestone, reward in sorted(REFERRAL_REWARDS.items()):
-            if paid_count >= milestone:
-                was_granted = await grant_referral_reward(referrer_id, milestone, reward)
+            if invited_count >= milestone:
+                was_granted = await grant_referral_reward(referrer_id, milestone, reward, invited_count)
                 if was_granted:
                     granted.append(reward["title"])
 
@@ -619,20 +685,39 @@ async def get_referral_stats(telegram_id: int) -> dict:
         async with db_pool.acquire() as conn:
             invited = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", telegram_id)
             paid = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='paid'", telegram_id)
-            pending_rewards = await conn.fetchval("""
-                SELECT COUNT(*) FROM referrals
-                WHERE referrer_id=$1 AND status='paid' AND reward_status='pending'
-            """, telegram_id)
             rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards WHERE referrer_id=$1", telegram_id)
+            bonus_requests = await conn.fetchval("SELECT COALESCE(bonus_requests, 0) FROM users WHERE telegram_id=$1", telegram_id)
+            rewards = await conn.fetch("""
+                SELECT milestone, reward_type, reward_value, COALESCE(reward_title, '') AS reward_title, created_at
+                FROM referral_rewards
+                WHERE referrer_id=$1
+                ORDER BY milestone
+            """, telegram_id)
         return {
             "invited": invited or 0,
             "paid": paid or 0,
-            "pending_rewards": pending_rewards or 0,
+            "pending_rewards": 0,
             "rewards_count": rewards_count or 0,
+            "bonus_requests": bonus_requests or 0,
+            "rewards": rewards or [],
         }
     except Exception as e:
         print(f"REFERRAL STATS ERROR: {short_error_text(e)}")
-        return {"invited": 0, "paid": 0, "pending_rewards": 0, "rewards_count": 0}
+        return {"invited": 0, "paid": 0, "pending_rewards": 0, "rewards_count": 0, "bonus_requests": 0, "rewards": []}
+
+
+def build_reward_history_lines(rewards) -> str:
+    if not rewards:
+        return "• Пока бонусов нет"
+
+    lines = []
+    for row in rewards:
+        milestone = int(row["milestone"])
+        title = row["reward_title"] or referral_reward_title(milestone, row["reward_type"], row["reward_value"])
+        created_at = row["created_at"].strftime("%d.%m.%Y") if row["created_at"] else ""
+        suffix = f" — {created_at}" if created_at else ""
+        lines.append(f"• {milestone} друг → {title}{suffix}")
+    return "\n".join(lines)
 
 
 async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
@@ -671,14 +756,17 @@ async def build_referral_invite_text(bot_obj: Bot, user_id: int) -> str:
 
 async def build_referral_stats_text(user_id: int) -> str:
     stats = await get_referral_stats(user_id)
+    rewards_text = build_reward_history_lines(stats.get("rewards", []))
     return (
         "📊 Моя статистика партнёрки\n\n"
         f"• Приглашено всего: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
+        f"• Бонусных запросов сейчас: {stats['bonus_requests']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
-        "Бонусы открываются по количеству приглашённых друзей, которые купили подписку."
+        "🎁 Уже получено:\n"
+        f"{rewards_text}\n\n"
+        "Бонусы начисляются автоматически за новых друзей, которые впервые зашли по вашей ссылке."
     )
-
 
 async def build_referral_bonuses_text(user_id: int) -> str:
     stats = await get_referral_stats(user_id)
@@ -1393,6 +1481,7 @@ async def admin_handler(message: Message):
         "/stats — общая статистика\n"
         "/users — последние пользователи\n"
         "/payments — платежи\n"
+        "/refstats — партнёрка\n"
         "/setplus telegram_id\n"
         "/setpro telegram_id\n"
         "/setvip telegram_id\n"
@@ -1439,6 +1528,9 @@ async def stats_handler(message: Message):
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
         payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
         total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
+        referral_invites = await conn.fetchval("SELECT COUNT(*) FROM referrals")
+        referral_paid = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE status='paid'")
+        referral_rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards")
 
         model_rows = await conn.fetch("""
             SELECT details AS model, COUNT(*) AS count
@@ -1478,7 +1570,58 @@ async def stats_handler(message: Message):
         f"⭐ Открытий оплаты Stars: {invoices}\n"
         f"✅ Платежей: {payments_count}\n"
         f"⭐ Stars получено: {total_stars}\n\n"
+        f"💰 Партнёрка:\n"
+        f"• приглашений: {referral_invites}\n"
+        f"• оплат от приглашённых: {referral_paid}\n"
+        f"• бонусов выдано: {referral_rewards_count}\n\n"
         f"🤖 Модели сегодня:\n{model_text}"
+    )
+
+
+@dp.message(Command("refstats"))
+async def refstats_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        total_referrals = await conn.fetchval("SELECT COUNT(*) FROM referrals")
+        paid_referrals = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE status='paid'")
+        rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards")
+        abuse_events = await conn.fetchval("SELECT COUNT(*) FROM referral_abuse_events")
+        top_rows = await conn.fetch("""
+            SELECT r.referrer_id,
+                   COALESCE(u.username, u.first_name, r.referrer_id::text) AS name,
+                   COUNT(*) AS invited,
+                   COUNT(*) FILTER (WHERE r.status='paid') AS paid
+            FROM referrals r
+            LEFT JOIN users u ON u.telegram_id = r.referrer_id
+            GROUP BY r.referrer_id, u.username, u.first_name
+            ORDER BY invited DESC, paid DESC, r.referrer_id
+            LIMIT 10
+        """)
+
+    def clean_name(value):
+        value = str(value or "партнёр")
+        if value.isdigit():
+            return f"ID {value}"
+        if not value.startswith("@") and " " not in value:
+            return f"@{value}"
+        return value
+
+    top_text = "Пока нет партнёров."
+    if top_rows:
+        top_text = "\n".join(
+            f"{index}. {clean_name(row['name'])} — {row['invited']} приглаш., {row['paid']} оплат"
+            for index, row in enumerate(top_rows, start=1)
+        )
+
+    await message.answer(
+        "💰 Referral stats\n\n"
+        f"Всего приглашений: {total_referrals}\n"
+        f"Оплат от приглашённых: {paid_referrals}\n"
+        f"Выдано бонусов: {rewards_count}\n"
+        f"Anti-abuse событий: {abuse_events}\n\n"
+        f"🏆 Топ партнёров:\n{top_text}"
     )
 
 
@@ -2054,6 +2197,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
