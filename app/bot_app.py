@@ -128,7 +128,7 @@ def main_menu():
                 InlineKeyboardButton(text="💳 Купить подписку", callback_data="premium"),
             ],
             [
-                InlineKeyboardButton(text="🤖 Выбрать нейросеть", callback_data="models"),
+                InlineKeyboardButton(text="🤖 Выбрать AI", callback_data="models"),
                 InlineKeyboardButton(text="💰 Заработать", callback_data="earn"),
             ],
             [InlineKeyboardButton(text="🧠 Наши каналы", callback_data="channels")],
@@ -389,15 +389,16 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 referrer_id BIGINT NOT NULL,
                 referred_id BIGINT NOT NULL UNIQUE,
-                status TEXT DEFAULT 'registered',
-                paid_plan TEXT,
+                status TEXT DEFAULT 'joined',
                 reward_status TEXT DEFAULT 'pending',
-                reward_details TEXT,
                 created_at TIMESTAMP DEFAULT NOW(),
-                paid_at TIMESTAMP
+                paid_at TIMESTAMP NULL
             );
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON referrals(referrer_id);")
+        await conn.execute("ALTER TABLE referrals ALTER COLUMN status SET DEFAULT 'joined';")
+        await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_status TEXT DEFAULT 'pending';")
+        await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP NULL;")
 
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
@@ -425,11 +426,11 @@ async def track_referral_start(referred_id: int, referrer_id: int | None):
 
             await conn.execute("""
                 INSERT INTO referrals (referrer_id, referred_id, status)
-                VALUES ($1, $2, 'registered')
+                VALUES ($1, $2, 'joined')
                 ON CONFLICT (referred_id) DO NOTHING
             """, referrer_id, referred_id)
 
-        await log_event(referred_id, "referral_registered", str(referrer_id))
+        await log_event(referred_id, "referral_joined", str(referrer_id))
         return True
     except Exception as e:
         print(f"REFERRAL TRACK ERROR: {short_error_text(e)}")
@@ -441,7 +442,7 @@ async def mark_referral_paid(referred_id: int, plan: str):
         async with db_pool.acquire() as conn:
             await conn.execute("""
                 UPDATE referrals
-                SET status='paid', paid_plan=$2, paid_at=NOW(), reward_details=$2
+                SET status='paid', paid_at=NOW()
                 WHERE referred_id=$1 AND status <> 'paid'
             """, referred_id, plan)
         await log_event(referred_id, "referral_paid", plan)
@@ -477,17 +478,20 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         f"• Приглашено: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
         f"• Бонусов ожидает: {stats['pending_rewards']}\n\n"
-        "🎁 На старте бонусы будут начисляться лимитами и Premium-днями.\n"
+        "🎁 Бонусы за приглашения:\n"
+        "• 1 друг → +50 запросов\n"
+        "• 3 друга → +3 дня PLUS\n"
+        "• 10 друзей → +7 дней PRO\n"
+        "• 25 друзей → VIP статус\n\n"
         "⭐ Stars/денежные выплаты подключим позже, когда партнёрка пройдёт тест."
     )
-
 
 async def setup_bot_info():
     await bot.set_my_commands([
         BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
-        BotCommand(command="models", description="🤖 Выбрать нейросеть"),
+        BotCommand(command="models", description="🤖 Выбрать AI"),
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
@@ -1270,8 +1274,7 @@ async def photo_handler(message: Message):
             if not edited_bytes:
                 print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
                 await wait_message.edit_text(
-                    "⚠️ Редактирование изображений временно недоступно.\n\n"
-                    "Попробуйте позже или выберите другую нейросеть.",
+                    "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
@@ -1340,7 +1343,7 @@ async def document_handler(message: Message):
     selected_model = user["selected_model"]
     if selected_model in {"nanobanana", "gptimage"}:
         await message.answer(
-            "📎 Для анализа файлов выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть».",
+            "📎 Для анализа файлов выберите ChatGPT, Claude или Gemini в меню «Выбрать AI».",
             reply_markup=main_menu(),
         )
         return
@@ -1447,7 +1450,7 @@ async def voice_handler(message: Message):
     selected_model = user["selected_model"]
     if selected_model in {"nanobanana", "gptimage"}:
         await message.answer(
-            "🎙 Для голосового общения выберите ChatGPT, Claude или Gemini в меню «Выбрать нейросеть».",
+            "🎙 Для голосового общения выберите ChatGPT, Claude или Gemini в меню «Выбрать AI».",
             reply_markup=main_menu(),
         )
         return
@@ -1580,8 +1583,7 @@ async def chat_handler(message: Message):
             if not image_bytes:
                 print(f"IMAGE PROVIDER RETURNED NO IMAGE | {selected_model} | {(text_note or '')[:1000]}")
                 await wait_message.edit_text(
-                    "⚠️ Генерация изображений временно недоступна.\n\n"
-                    "Попробуйте позже или выберите другую нейросеть.",
+                    "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
@@ -1604,17 +1606,14 @@ async def chat_handler(message: Message):
             admin_error = short_error_text(e)
             print(f"IMAGE ERROR SHORT:\n{admin_error}")
             print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
-            await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
             try:
                 await wait_message.edit_text(
-                    "⚠️ Генерация изображений временно недоступна.\n\n"
-                    "Попробуйте позже или выберите другую нейросеть.",
+                    "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
             except Exception:
                 await message.answer(
-                    "⚠️ Генерация изображений временно недоступна.\n\n"
-                    "Попробуйте позже или выберите другую нейросеть.",
+                    "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
             return
