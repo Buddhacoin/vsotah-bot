@@ -31,3 +31,4 @@ def build_telegram_share_url(referral_link: str) -> str:
     return f"https://t.me/share/url?url={quote(referral_link)}&text={quote(text)}"
 
 
+
