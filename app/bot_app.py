@@ -671,15 +671,6 @@ async def build_referral_stats_text(user_id: int) -> str:
     )
 
 
-async def build_referral_bonuses_text(user_id: int) -> str:
-    stats = await get_referral_stats(user_id)
-    return (
-        "🎁 Мои бонусы\n\n"
-        f"Сейчас приглашено: {stats['invited']}\n"
-        f"Бонусов получено: {stats['rewards_count']}"
-    )
-
-
 async def build_referral_leaderboard_text() -> str:
     async with db_pool.acquire() as conn:
         invited_rows = await conn.fetch("""
@@ -1196,19 +1187,6 @@ async def earn_top_callback(callback: CallbackQuery):
     await safe_edit_or_send(
         callback,
         await build_referral_leaderboard_text(),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
-    )
-
-
-@dp.callback_query(F.data == "earn_bonuses")
-async def earn_bonuses_callback(callback: CallbackQuery):
-    await callback.answer()
-    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-    await log_event(callback.from_user.id, "referral_bonuses")
-    bot_info = await callback.bot.get_me()
-    await safe_edit_or_send(
-        callback,
-        await build_referral_bonuses_text(callback.from_user.id),
         reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
     )
 
@@ -2045,6 +2023,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
