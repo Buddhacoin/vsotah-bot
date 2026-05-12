@@ -13,3 +13,4 @@ def parse_referral_code(text: str):
 
     return int(match.group(1))
 
+
