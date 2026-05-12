@@ -104,6 +104,13 @@ TARIFFS = {
     },
 }
 
+REFERRAL_REWARDS = {
+    1: {"type": "requests", "amount": 50, "title": "+50 запросов"},
+    3: {"type": "plan_days", "plan": "PLUS", "days": 3, "title": "+3 дня PLUS"},
+    10: {"type": "plan_days", "plan": "PRO", "days": 7, "title": "+7 дней PRO"},
+    25: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус на 30 дней"},
+}
+
 SPAM_WINDOW_SECONDS = 8
 SPAM_MAX_MESSAGES = 5
 SPAM_BLOCK_SECONDS = 60
@@ -337,6 +344,7 @@ async def init_db():
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_used INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_used INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_image_used INTEGER DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_requests INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS day_start DATE DEFAULT CURRENT_DATE;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS week_start DATE DEFAULT CURRENT_DATE;")
 
@@ -400,6 +408,19 @@ async def init_db():
         await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_status TEXT DEFAULT 'pending';")
         await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP NULL;")
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                milestone INTEGER NOT NULL,
+                reward_type TEXT NOT NULL,
+                reward_value TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(referrer_id, milestone)
+            );
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_referrer_id ON referral_rewards(referrer_id);")
+
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
     try:
@@ -437,17 +458,123 @@ async def track_referral_start(referred_id: int, referrer_id: int | None):
         return False
 
 
-async def mark_referral_paid(referred_id: int, plan: str):
+async def apply_plan_days_bonus(telegram_id: int, bonus_plan: str, days: int):
+    bonus_plan = (bonus_plan or "PLUS").upper()
+    now = datetime.utcnow()
+
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT plan, plan_until FROM users WHERE telegram_id=$1", telegram_id)
+        if not user:
+            return
+
+        current_plan = (user["plan"] or "FREE").upper()
+        current_until = user["plan_until"]
+
+        if current_plan != "FREE" and current_until and current_until > now:
+            base_until = current_until
+        else:
+            base_until = now
+
+        final_plan = bonus_plan
+        if plan_level(current_plan) > plan_level(bonus_plan) and current_until and current_until > now:
+            final_plan = current_plan
+
+        await conn.execute("""
+            UPDATE users
+            SET plan=$2, plan_until=$3
+            WHERE telegram_id=$1
+        """, telegram_id, final_plan, base_until + timedelta(days=days))
+
+
+async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict) -> bool:
+    reward_type = reward["type"]
+    if reward_type == "requests":
+        reward_value = str(reward["amount"])
+    else:
+        reward_value = f"{reward['plan']}:{reward['days']}"
+
+    async with db_pool.acquire() as conn:
+        inserted = await conn.fetchrow("""
+            INSERT INTO referral_rewards (referrer_id, milestone, reward_type, reward_value)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (referrer_id, milestone) DO NOTHING
+            RETURNING id
+        """, referrer_id, milestone, reward_type, reward_value)
+
+        if not inserted:
+            return False
+
+        if reward_type == "requests":
+            await conn.execute("""
+                UPDATE users
+                SET bonus_requests = COALESCE(bonus_requests, 0) + $2
+                WHERE telegram_id=$1
+            """, referrer_id, int(reward["amount"]))
+
+    if reward_type == "plan_days":
+        await apply_plan_days_bonus(referrer_id, reward["plan"], int(reward["days"]))
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE referrals
+            SET reward_status='rewarded'
+            WHERE id IN (
+                SELECT id FROM referrals
+                WHERE referrer_id=$1 AND status='paid'
+                ORDER BY paid_at NULLS LAST, created_at
+                LIMIT $2
+            )
+        """, referrer_id, milestone)
+
+    await log_event(referrer_id, "referral_reward", f"{milestone}: {reward.get('title', reward_type)}")
+    return True
+
+
+async def process_referral_rewards(referrer_id: int) -> list[str]:
+    if not referrer_id:
+        return []
+
+    granted: list[str] = []
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute("""
+            paid_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='paid'",
+                referrer_id,
+            )
+
+        paid_count = paid_count or 0
+        for milestone, reward in sorted(REFERRAL_REWARDS.items()):
+            if paid_count >= milestone:
+                was_granted = await grant_referral_reward(referrer_id, milestone, reward)
+                if was_granted:
+                    granted.append(reward["title"])
+
+    except Exception as e:
+        print(f"REFERRAL REWARD ERROR: {short_error_text(e)}")
+
+    return granted
+
+
+async def mark_referral_paid(referred_id: int, plan: str) -> int | None:
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("""
                 UPDATE referrals
-                SET status='paid', paid_at=NOW()
+                SET status='paid', paid_at=COALESCE(paid_at, NOW())
                 WHERE referred_id=$1 AND status <> 'paid'
-            """, referred_id, plan)
-        await log_event(referred_id, "referral_paid", plan)
+                RETURNING referrer_id
+            """, referred_id)
+
+        if not row:
+            return None
+
+        referrer_id = row["referrer_id"]
+        await log_event(referred_id, "referral_paid", f"{plan} from {referrer_id}")
+        await process_referral_rewards(referrer_id)
+        return referrer_id
     except Exception as e:
         print(f"REFERRAL PAID ERROR: {short_error_text(e)}")
+        return None
 
 
 async def get_referral_stats(telegram_id: int) -> dict:
@@ -459,10 +586,16 @@ async def get_referral_stats(telegram_id: int) -> dict:
                 SELECT COUNT(*) FROM referrals
                 WHERE referrer_id=$1 AND status='paid' AND reward_status='pending'
             """, telegram_id)
-        return {"invited": invited or 0, "paid": paid or 0, "pending_rewards": pending_rewards or 0}
+            rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards WHERE referrer_id=$1", telegram_id)
+        return {
+            "invited": invited or 0,
+            "paid": paid or 0,
+            "pending_rewards": pending_rewards or 0,
+            "rewards_count": rewards_count or 0,
+        }
     except Exception as e:
         print(f"REFERRAL STATS ERROR: {short_error_text(e)}")
-        return {"invited": 0, "paid": 0, "pending_rewards": 0}
+        return {"invited": 0, "paid": 0, "pending_rewards": 0, "rewards_count": 0}
 
 
 async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
@@ -477,7 +610,8 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         "📊 Твоя статистика:\n"
         f"• Приглашено: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• Бонусов ожидает: {stats['pending_rewards']}\n\n"
+        f"• Бонусов ожидает: {stats['pending_rewards']}\n"
+        f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Бонусы за приглашения:\n"
         "• 1 друг → +50 запросов\n"
         "• 3 друга → +3 дня PLUS\n"
@@ -578,8 +712,12 @@ async def check_spam(telegram_id: int):
 
 async def check_limit(user):
     plan = user["plan"]
+    bonus_requests = dict(user).get("bonus_requests") or 0
 
     if plan == "VIP":
+        return True, None
+
+    if bonus_requests > 0:
         return True, None
 
     if plan == "FREE":
@@ -600,8 +738,18 @@ async def increase_usage(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE users
-            SET daily_used = daily_used + 1,
-                weekly_used = weekly_used + 1
+            SET bonus_requests = CASE
+                    WHEN COALESCE(bonus_requests, 0) > 0 THEN bonus_requests - 1
+                    ELSE COALESCE(bonus_requests, 0)
+                END,
+                daily_used = CASE
+                    WHEN COALESCE(bonus_requests, 0) > 0 THEN daily_used
+                    ELSE daily_used + 1
+                END,
+                weekly_used = CASE
+                    WHEN COALESCE(bonus_requests, 0) > 0 THEN weekly_used
+                    ELSE weekly_used + 1
+                END
             WHERE telegram_id=$1
         """, telegram_id)
 
@@ -689,6 +837,10 @@ async def user_profile_text(user):
             f"Запросов в неделю: {user['weekly_used']}/{FREE_WEEKLY_LIMIT}"
         )
 
+    bonus_requests = dict(user).get("bonus_requests") or 0
+    if bonus_requests > 0:
+        usage_block += f"\nБонусные запросы: {bonus_requests}"
+
     text = (
         f"📊 Статистика использования\n\n"
         f"{usage_block}\n\n"
@@ -703,7 +855,8 @@ async def user_profile_text(user):
     text += (
         "💰 Заработать:\n"
         f"• Приглашено: {referral_stats['invited']}\n"
-        f"• Купили подписку: {referral_stats['paid']}\n\n"
+        f"• Купили подписку: {referral_stats['paid']}\n"
+        f"• Бонусов получено: {referral_stats['rewards_count']}\n\n"
     )
 
     text += (
@@ -1004,7 +1157,19 @@ async def successful_payment_handler(message: Message):
         )
 
     await activate_plan(message.from_user.id, plan, months)
-    await mark_referral_paid(message.from_user.id, plan)
+    referrer_id = await mark_referral_paid(message.from_user.id, plan)
+
+    if referrer_id:
+        try:
+            await bot.send_message(
+                referrer_id,
+                "🎉 По твоей реферальной ссылке купили подписку!\n\n"
+                "Если достигнут новый порог, бонус уже начислен автоматически.",
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            pass
+
     await message.answer(f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.", reply_markup=main_menu())
 
 
@@ -1710,6 +1875,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
