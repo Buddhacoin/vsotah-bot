@@ -107,8 +107,9 @@ TARIFFS = {
 REFERRAL_REWARDS = {
     1: {"type": "requests", "amount": 50, "title": "+50 запросов"},
     3: {"type": "plan_days", "plan": "PLUS", "days": 3, "title": "+3 дня PLUS"},
-    10: {"type": "plan_days", "plan": "PRO", "days": 7, "title": "+7 дней PRO"},
-    25: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус на 30 дней"},
+    10: {"type": "plan_days", "plan": "PRO", "days": 5, "title": "+5 дней PRO"},
+    25: {"type": "plan_days", "plan": "VIP", "days": 7, "title": "VIP статус 7 дней"},
+    100: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус 30 дней"},
 }
 
 SPAM_WINDOW_SECONDS = 8
@@ -146,58 +147,12 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Текстовые AI", callback_data="models_text")],
-            [InlineKeyboardButton(text="🌇 Image AI", callback_data="models_image")],
-            [InlineKeyboardButton(text="🎬 Video AI", callback_data="models_video")],
-            [InlineKeyboardButton(text="👑 VIP AI", callback_data="models_vip")],
-            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
-        ]
-    )
-
-
-def models_text_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
             [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini", callback_data="set_model_gpt")],
             [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash", callback_data="set_model_gemini")],
             [InlineKeyboardButton(text="✴️ Claude — Sonnet", callback_data="set_model_claude")],
-            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
-            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
-        ]
-    )
-
-
-def models_image_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
             [InlineKeyboardButton(text="🍌 Nano Banana Pro", callback_data="set_model_nanobanana")],
             [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
-            [InlineKeyboardButton(text="🎨 Midjourney — скоро", callback_data="model_soon_midjourney")],
-            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
-            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
-        ]
-    )
-
-
-def models_video_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🎬 Runway Video — скоро", callback_data="model_soon_runway")],
-            [InlineKeyboardButton(text="🎞 Pika Video — скоро", callback_data="model_soon_pika")],
-            [InlineKeyboardButton(text="👑 Открыть VIP", callback_data="tariff_VIP")],
-            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
-            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
-        ]
-    )
-
-
-def models_vip_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="👑 Что входит в VIP", callback_data="vip_info")],
-            [InlineKeyboardButton(text="💳 Купить VIP", callback_data="tariff_VIP")],
-            [InlineKeyboardButton(text="← К разделам AI", callback_data="models")],
-            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
 
@@ -207,8 +162,7 @@ def tariffs_menu():
         inline_keyboard=[
             [InlineKeyboardButton(text="⭐ PLUS — 500 запросов / неделя", callback_data="tariff_PLUS")],
             [InlineKeyboardButton(text="💎 PRO — 1400 запросов / неделя", callback_data="tariff_PRO")],
-            [InlineKeyboardButton(text="👑 VIP — максимум AI", callback_data="tariff_VIP")],
-            [InlineKeyboardButton(text="👑 Почему VIP", callback_data="vip_info")],
+            [InlineKeyboardButton(text="👑 VIP — безлимит", callback_data="tariff_VIP")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -365,54 +319,28 @@ def welcome_text():
 def premium_text():
     return """💳 Купить подписку
 
-Выберите тариф под свои задачи. Все покупки проходят через Telegram Stars.
-
 🟢 FREE
+• ChatGPT — GPT-4o mini
+• Gemini — 2.5 Flash
+• Claude — Sonnet
+• Nano Banana Pro
+• Sora GPT Image
+
 • 15 запросов в день
+• из них 5 Image
 • 105 запросов в неделю
-• до 5 Image-запросов в день
 
 ⭐ PLUS — 500 запросов в неделю
+• Все модели
 • больше лимитов
-• удобно для регулярного общения и работы
 
 💎 PRO — 1400 запросов в неделю
-• больше запаса на тексты, фото, файлы и изображения
-• подходит для активной ежедневной работы
+• Все модели
+• больше лимитов
 
-👑 VIP — максимум AI
-• безлимит по основным запросам
-• приоритетный тариф для новых моделей
-• подготовка под Midjourney и Video AI
-• лучший вариант, если нужен полный доступ ко всему VSotah AI"""
-
-
-def vip_info_text():
-    return """👑 VIP — максимальный доступ
-
-VIP нужен для пользователей, которые хотят пользоваться ботом без постоянных ограничений и первыми получать новые AI-возможности.
-
-Что входит сейчас:
-• максимум лимитов
-• все доступные текстовые AI
-• Image AI
-• работа с фото, файлами и голосом
-
-Что готовим дальше для VIP:
-• Midjourney generation
-• минимум 2 Video AI генератора
-• новые модели OpenAI, Claude, Gemini и DeepSeek
-• расширенные лимиты на image/video задачи
-
-VIP должен ощущаться как полный AI-комбайн в кармане."""
-
-
-def coming_soon_model_text(model_title: str):
-    return (
-        f"🚧 {model_title} пока готовится.\n\n"
-        "Мы уже подготовили место в меню, чтобы потом подключить модель без переделки интерфейса.\n\n"
-        "Сейчас можно пользоваться ChatGPT, Claude, Gemini, Nano Banana Pro и Sora GPT Image."
-    )
+👑 VIP — безлимит
+• Все модели
+• максимум возможностей"""
 
 def channels_text():
     return """🧠 Наши каналы:
@@ -554,6 +482,7 @@ async def track_referral_start(referred_id: int, referrer_id: int | None):
             """, referrer_id, referred_id)
 
         await log_event(referred_id, "referral_joined", str(referrer_id))
+        await process_referral_rewards(referrer_id)
         return True
     except Exception as e:
         print(f"REFERRAL TRACK ERROR: {short_error_text(e)}")
@@ -639,14 +568,14 @@ async def process_referral_rewards(referrer_id: int) -> list[str]:
     granted: list[str] = []
     try:
         async with db_pool.acquire() as conn:
-            paid_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='paid'",
+            invited_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1",
                 referrer_id,
             )
 
-        paid_count = paid_count or 0
+        invited_count = invited_count or 0
         for milestone, reward in sorted(REFERRAL_REWARDS.items()):
-            if paid_count >= milestone:
+            if invited_count >= milestone:
                 was_granted = await grant_referral_reward(referrer_id, milestone, reward)
                 if was_granted:
                     granted.append(reward["title"])
@@ -712,14 +641,14 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         "📊 Твоя статистика:\n"
         f"• Приглашено: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• Бонусов ожидает: {stats['pending_rewards']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Бонусы за приглашения:\n"
         "• 1 друг → +50 запросов\n"
         "• 3 друга → +3 дня PLUS\n"
-        "• 10 друзей → +7 дней PRO\n"
-        "• 25 друзей → VIP статус\n\n"
-        "⭐ Stars/денежные выплаты подключим позже, когда партнёрка пройдёт тест."
+        "• 10 друзей → +5 дней PRO\n"
+        "• 25 друзей → VIP статус 7 дней\n"
+        "• 100 друзей → VIP статус 30 дней\n\n"
+        "Бонусы выдаются внутри бота. Денежные выплаты пока не подключаем."
     )
 
 
@@ -740,9 +669,8 @@ async def build_referral_stats_text(user_id: int) -> str:
         "📊 Моя статистика партнёрки\n\n"
         f"• Приглашено всего: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• Бонусов ожидает: {stats['pending_rewards']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
-        "Чем больше друзей покупают подписку, тем быстрее открываются следующие бонусы."
+        "Бонусы открываются по количеству приглашённых друзей."
     )
 
 
@@ -757,11 +685,25 @@ async def build_referral_bonuses_text(user_id: int) -> str:
             ORDER BY milestone
         """, user_id)
 
-    milestones_text = []
-    paid = stats["paid"]
+    invited = stats["invited"]
+    milestone_names = {
+        1: "1 друг",
+        3: "3 друга",
+        10: "10 друзей",
+        25: "25 друзей",
+        100: "100 друзей",
+    }
+
+    lines = []
     for milestone, reward in sorted(REFERRAL_REWARDS.items()):
-        status = "✅ получено" if paid >= milestone else f"ещё {milestone - paid}"
-        milestones_text.append(f"• {milestone} оплат(а) → {reward['title']} — {status}")
+        if invited >= milestone:
+            status = "✅ получено"
+        else:
+            left = milestone - invited
+            friend_word = "друг" if left == 1 else "друга" if 2 <= left <= 4 else "друзей"
+            status = f"ещё {left} {friend_word}"
+        label = milestone_names.get(milestone, f"{milestone} друзей")
+        lines.append(f"• {label} → {reward['title']} — {status}")
 
     history_text = ""
     if rewards:
@@ -769,12 +711,14 @@ async def build_referral_bonuses_text(user_id: int) -> str:
         for row in rewards:
             created = row["created_at"].strftime("%d.%m.%Y") if row["created_at"] else ""
             history_lines.append(f"• Порог {row['milestone']} — начислено {created}")
-        history_text = "\n\n🎁 Уже начислено:\n" + "\n".join(history_lines)
+        history_text = "\n\n✅ Уже начислено:\n" + "\n".join(history_lines)
 
     return (
         "🎁 Мои бонусы\n\n"
-        "Бонусы начисляются автоматически, когда приглашённые друзья покупают подписку.\n\n"
-        + "\n".join(milestones_text)
+        f"Сейчас приглашено: {invited}\n"
+        f"Бонусов получено: {stats['rewards_count']}\n\n"
+        "Шкала бонусов:\n"
+        + "\n".join(lines)
         + history_text
     )
 
@@ -1255,71 +1199,10 @@ async def models_callback(callback: CallbackQuery):
     await log_event(callback.from_user.id, "models_open")
     await safe_edit_or_send(
         callback,
-        "🤖 Выберите раздел AI:\n\n"
-        "Текст, изображения, будущие Video AI и VIP-возможности собраны в одном меню.",
+        "🤖 Выберите нейросеть:\n\n"
+        "Все базовые модели сейчас доступны бесплатно.",
         reply_markup=models_menu(),
     )
-
-
-@dp.callback_query(F.data == "models_text")
-async def models_text_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "models_text_open")
-    await safe_edit_or_send(
-        callback,
-        "📝 Текстовые AI\n\nВыберите нейросеть для общения, работы, идей, анализа и текстов.",
-        reply_markup=models_text_menu(),
-    )
-
-
-@dp.callback_query(F.data == "models_image")
-async def models_image_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "models_image_open")
-    await safe_edit_or_send(
-        callback,
-        "🌇 Image AI\n\nВыберите генератор изображений. Midjourney уже добавлен как будущий раздел, но пока не подключён к API.",
-        reply_markup=models_image_menu(),
-    )
-
-
-@dp.callback_query(F.data == "models_video")
-async def models_video_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "models_video_open")
-    await safe_edit_or_send(
-        callback,
-        "🎬 Video AI\n\nРаздел подготовлен под подключение минимум двух AI-видеогенераторов. Пока API не подключены, кнопки работают как аккуратный preview без ошибок.",
-        reply_markup=models_video_menu(),
-    )
-
-
-@dp.callback_query(F.data == "models_vip")
-async def models_vip_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "models_vip_open")
-    await safe_edit_or_send(callback, vip_info_text(), reply_markup=models_vip_menu())
-
-
-@dp.callback_query(F.data == "vip_info")
-async def vip_info_callback(callback: CallbackQuery):
-    await callback.answer()
-    await log_event(callback.from_user.id, "vip_info")
-    await safe_edit_or_send(callback, vip_info_text(), reply_markup=models_vip_menu())
-
-
-@dp.callback_query(F.data.startswith("model_soon_"))
-async def model_soon_callback(callback: CallbackQuery):
-    await callback.answer("Эта модель скоро появится", show_alert=True)
-    model_key = callback.data.replace("model_soon_", "")
-    titles = {
-        "midjourney": "Midjourney",
-        "runway": "Runway Video",
-        "pika": "Pika Video",
-    }
-    title = titles.get(model_key, "Эта модель")
-    await log_event(callback.from_user.id, "model_soon", model_key)
-    await safe_edit_or_send(callback, coming_soon_model_text(title), reply_markup=models_menu())
 
 
 @dp.callback_query(F.data == "earn")
@@ -1394,14 +1277,9 @@ async def tariff_callback(callback: CallbackQuery):
         return
     await log_event(callback.from_user.id, "tariff_select", plan)
     tariff = TARIFFS[plan]
-    tariff_details = {
-        "PLUS": "⭐ PLUS\n\n500 запросов в неделю. Хороший старт, если FREE уже мало.",
-        "PRO": "💎 PRO\n\n1400 запросов в неделю. Для активной ежедневной работы с текстом, файлами, фото и изображениями.",
-        "VIP": "👑 VIP\n\nМаксимальный тариф VSotah AI: безлимит по основным запросам, полный доступ к текущим возможностям и приоритет для будущих Midjourney / Video AI моделей.",
-    }
     await safe_edit_or_send(
         callback,
-        f"{tariff_details.get(plan, tariff['title'])}\n\nВыберите период подписки:",
+        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nВыберите период подписки:",
         reply_markup=period_menu(plan),
     )
 
@@ -2210,4 +2088,9 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
 
