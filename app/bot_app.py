@@ -676,50 +676,10 @@ async def build_referral_stats_text(user_id: int) -> str:
 
 async def build_referral_bonuses_text(user_id: int) -> str:
     stats = await get_referral_stats(user_id)
-
-    async with db_pool.acquire() as conn:
-        rewards = await conn.fetch("""
-            SELECT milestone, reward_type, reward_value, created_at
-            FROM referral_rewards
-            WHERE referrer_id=$1
-            ORDER BY milestone
-        """, user_id)
-
-    invited = stats["invited"]
-    milestone_names = {
-        1: "1 друг",
-        3: "3 друга",
-        10: "10 друзей",
-        25: "25 друзей",
-        100: "100 друзей",
-    }
-
-    lines = []
-    for milestone, reward in sorted(REFERRAL_REWARDS.items()):
-        if invited >= milestone:
-            status = "✅ получено"
-        else:
-            left = milestone - invited
-            friend_word = "друг" if left == 1 else "друга" if 2 <= left <= 4 else "друзей"
-            status = f"ещё {left} {friend_word}"
-        label = milestone_names.get(milestone, f"{milestone} друзей")
-        lines.append(f"• {label} → {reward['title']} — {status}")
-
-    history_text = ""
-    if rewards:
-        history_lines = []
-        for row in rewards:
-            created = row["created_at"].strftime("%d.%m.%Y") if row["created_at"] else ""
-            history_lines.append(f"• Порог {row['milestone']} — начислено {created}")
-        history_text = "\n\n✅ Уже начислено:\n" + "\n".join(history_lines)
-
     return (
         "🎁 Мои бонусы\n\n"
-        f"Сейчас приглашено: {invited}\n"
-        f"Бонусов получено: {stats['rewards_count']}\n\n"
-        "Шкала бонусов:\n"
-        + "\n".join(lines)
-        + history_text
+        f"Сейчас приглашено: {stats['invited']}\n"
+        f"Бонусов получено: {stats['rewards_count']}"
     )
 
 
