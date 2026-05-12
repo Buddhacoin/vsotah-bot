@@ -1063,12 +1063,6 @@ async def start_handler(message: Message):
         return
     recent_starts[message.from_user.id] = now
 
-    # Убираем сообщение пользователя «/start», чтобы после приветствия не оставался дубль команды в чате.
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
     referrer_id = parse_referral_code(message.text or "")
     await track_referral_start(message.from_user.id, referrer_id)
 
