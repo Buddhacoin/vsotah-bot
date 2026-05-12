@@ -12,5 +12,3 @@ def parse_referral_code(text: str):
         return None
 
     return int(match.group(1))
-
-
