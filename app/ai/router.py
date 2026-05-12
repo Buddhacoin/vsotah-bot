@@ -12,6 +12,14 @@ from google.genai import types
 from app.ai.prompts import system_prompt, clean_ai_answer
 from app.ai.memory import build_memory
 from app.ai.personalities import get_personality
+from app.ai.image_router import (
+    build_image_generation_prompt,
+    build_image_edit_prompt,
+    image_result_caption,
+    infer_gemini_aspect_ratio,
+    infer_openai_image_size,
+)
+from app.ai.vision_router import build_vision_prompt, build_pdf_vision_prompt
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -334,7 +342,7 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
         )
 
     system_text = system_prompt(get_personality(selected_model))
-    question = question.strip() or "Что изображено на фото? Опиши подробно и помоги пользователю."
+    question = build_vision_prompt(question)
 
     calls = {
         "openai": lambda: openai_vision(system_text, question, image_bytes, history),
@@ -345,16 +353,16 @@ async def vision_router(selected_model: str, question: str, image_bytes: bytes, 
 
 
 async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> str:
-    """Translate and strengthen image prompts before sending them to image models."""
-    original = (user_prompt or "").strip()
-    if not original:
-        original = "Create a high quality detailed image."
+    """Image/Vision Pipeline 2.1: smart deterministic prompt + optional AI polishing."""
+    original = (user_prompt or "").strip() or "Create a high quality detailed image."
+    deterministic_prompt = build_image_generation_prompt(original, image_model)
 
     system = (
         "You are a professional prompt engineer for AI image generation. "
         "Translate the user's request to clear English and make it specific for image generation. "
         "Preserve the user's main subject EXACTLY. If the user asks for an elephant, the image MUST contain an elephant, not a cat or another animal. "
         "Do not add random text, signs, logos, watermarks, captions, or fake letters unless the user explicitly asks for text. "
+        "Respect the target aspect ratio and image type from the provided plan. "
         "Keep the prompt concise but vivid: subject, scene, composition, lighting, style, quality. "
         "Return ONLY the final English image prompt, without explanations."
     )
@@ -362,6 +370,7 @@ async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> 
     user = (
         f"Image model: {image_model}\n"
         f"User request: {original}\n\n"
+        f"VSotahBot image plan:\n{deterministic_prompt}\n\n"
         "Make a reliable English prompt. The generated image must follow the user request literally."
     )
 
@@ -385,15 +394,13 @@ async def enhance_image_prompt(user_prompt: str, image_model: str = "image") -> 
     except Exception as e:
         print(f"IMAGE PROMPT ENHANCE ERROR: {short_error_text(e)}")
 
-    return (
-        f"Create a high quality, detailed image that follows this request exactly: {original}. "
-        "Do not add random text, captions, watermarks, logos, or fake letters unless explicitly requested."
-    )[:2500]
+    return deterministic_prompt[:2500]
 
 
 async def enhance_image_edit_prompt(user_prompt: str) -> str:
-    """Translate and strengthen image edit prompts before sending them to image editing."""
+    """Image/Vision Pipeline 2.1: smart edit instructions + optional AI polishing."""
     original = (user_prompt or "").strip() or "Improve this image while keeping the same subject."
+    deterministic_prompt = build_image_edit_prompt(original)
 
     system = (
         "You are a professional prompt engineer for AI image editing. "
@@ -411,7 +418,7 @@ async def enhance_image_edit_prompt(user_prompt: str) -> str:
                 model=OPENAI_TEXT_MODEL,
                 messages=[
                     {"role": "system", "content": system},
-                    {"role": "user", "content": original},
+                    {"role": "user", "content": deterministic_prompt},
                 ],
                 max_completion_tokens=400,
             ),
@@ -423,10 +430,7 @@ async def enhance_image_edit_prompt(user_prompt: str) -> str:
     except Exception as e:
         print(f"IMAGE EDIT PROMPT ENHANCE ERROR: {short_error_text(e)}")
 
-    return (
-        f"Edit this image according to the request: {original}. "
-        "Preserve the original subject and identity. Do not add random text or watermarks."
-    )[:2000]
+    return deterministic_prompt[:2000]
 
 
 async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
@@ -441,7 +445,7 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
             prompt=enhanced_prompt,
             config=types.GenerateImagesConfig(
                 number_of_images=1,
-                aspect_ratio="1:1",
+                aspect_ratio=infer_gemini_aspect_ratio(prompt),
                 person_generation="allow_adult",
             ),
         )
@@ -452,11 +456,11 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
         image_obj = response.generated_images[0].image
 
         if hasattr(image_obj, "image_bytes") and image_obj.image_bytes:
-            return image_obj.image_bytes, "🍌 Готово"
+            return image_obj.image_bytes, image_result_caption("nanobanana")
 
         buffer = BytesIO()
         image_obj.save(buffer, format="PNG")
-        return buffer.getvalue(), "🍌 Готово"
+        return buffer.getvalue(), image_result_caption("nanobanana")
 
     return await asyncio.to_thread(run_image_generation)
 
@@ -475,14 +479,14 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
     response = await openai_client.images.generate(
         model=GPT_IMAGE_MODEL,
         prompt=enhanced_prompt,
-        size="1024x1024",
+        size=infer_openai_image_size(prompt),
         quality=GPT_IMAGE_QUALITY,
         n=1,
     )
 
     item = response.data[0]
     if getattr(item, "b64_json", None):
-        return normalize_b64(item.b64_json), "🌀 Готово"
+        return normalize_b64(item.b64_json), image_result_caption("gptimage")
 
     return None, "⚠️ Sora GPT Image не вернул изображение. Попробуйте другой запрос."
 
@@ -512,7 +516,7 @@ async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None,
 
     item = response.data[0]
     if getattr(item, "b64_json", None):
-        return normalize_b64(item.b64_json), "🖼 Готово"
+        return normalize_b64(item.b64_json), image_result_caption("gptimage", "edit")
 
     return None, "⚠️ Редактирование изображения не вернуло результат. Попробуйте другой запрос."
 
@@ -558,12 +562,7 @@ async def analyze_pdf_images_with_openai(
     content: list[dict] = [
         {
             "type": "text",
-            "text": (
-                f"Пользователь отправил PDF-файл: {filename}.\n"
-                "PDF не содержит обычного текстового слоя или плохо читается как текст, поэтому ниже страницы как изображения.\n\n"
-                f"Задача пользователя: {question}\n\n"
-                "Прочитай всё, что видно на страницах, и ответь по делу."
-            ),
+            "text": build_pdf_vision_prompt(filename, question),
         }
     ]
 
