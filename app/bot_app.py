@@ -28,8 +28,12 @@ from app.ai.router import (
     generate_nano_banana_image,
     generate_gpt_image,
     edit_gpt_image,
-    analyze_pdf_images_with_openai,
+)
+from app.ai.file_router import (
+    extract_document_text,
     file_router,
+    analyze_pdf_images_with_openai,
+    build_file_status_text,
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
 
@@ -645,92 +649,7 @@ async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
     return "voice.ogg", buffer.getvalue()
 
 
-def extract_document_text(filename: str, file_bytes: bytes) -> str:
-    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-
-    if ext in {"txt", "md", "csv", "log"}:
-        for encoding in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
-            try:
-                return file_bytes.decode(encoding, errors="replace")[:FILE_TEXT_LIMIT]
-            except Exception:
-                continue
-        return file_bytes.decode("utf-8", errors="replace")[:FILE_TEXT_LIMIT]
-
-    if ext == "pdf":
-        pages: list[str] = []
-
-        # 1) pypdf — быстрый вариант для PDF с текстовым слоем
-        try:
-            from pypdf import PdfReader
-            reader = PdfReader(BytesIO(file_bytes))
-            for page in reader.pages[:25]:
-                text = page.extract_text() or ""
-                if text.strip():
-                    pages.append(text.strip())
-                if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
-                    break
-        except Exception as e:
-            print(f"PDF PYPDF READ ERROR: {e}")
-
-        # 2) pdfplumber — иногда лучше читает таблицы/чеки
-        if not "\n".join(pages).strip():
-            try:
-                import pdfplumber
-                with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-                    for page in pdf.pages[:25]:
-                        text = page.extract_text() or ""
-                        if text.strip():
-                            pages.append(text.strip())
-                        if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
-                            break
-            except Exception as e:
-                print(f"PDF PDFPLUMBER READ ERROR: {e}")
-
-        # 3) PyMuPDF — ещё один fallback для текстового слоя
-        if not "\n".join(pages).strip():
-            try:
-                import fitz
-                doc = fitz.open(stream=file_bytes, filetype="pdf")
-                for page in doc[:25]:
-                    text = page.get_text("text") or ""
-                    if text.strip():
-                        pages.append(text.strip())
-                    if len("\n".join(pages)) >= FILE_TEXT_LIMIT:
-                        break
-                doc.close()
-            except Exception as e:
-                print(f"PDF FITZ TEXT READ ERROR: {e}")
-
-        return "\n\n".join(pages)[:FILE_TEXT_LIMIT]
-
-    if ext == "docx":
-        try:
-            from docx import Document
-            doc = Document(BytesIO(file_bytes))
-            parts = [p.text for p in doc.paragraphs if p.text.strip()]
-            return "\n".join(parts)[:FILE_TEXT_LIMIT]
-        except Exception as e:
-            raise ValueError(f"DOCX_READ_ERROR: {e}")
-
-    if ext in {"xlsx", "xlsm"}:
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
-            lines = []
-            for ws in wb.worksheets[:5]:
-                lines.append(f"Лист: {ws.title}")
-                for row in ws.iter_rows(max_row=80, values_only=True):
-                    values = [str(v) if v is not None else "" for v in row]
-                    if any(v.strip() for v in values):
-                        lines.append(" | ".join(values))
-                    if len("\n".join(lines)) >= FILE_TEXT_LIMIT:
-                        return "\n".join(lines)[:FILE_TEXT_LIMIT]
-            return "\n".join(lines)[:FILE_TEXT_LIMIT]
-        except Exception as e:
-            raise ValueError(f"XLSX_READ_ERROR: {e}")
-
-    raise ValueError("UNSUPPORTED_FILE_TYPE")
-
+# File extraction lives in app/ai/file_router.py.
 
 def short_error_text(error: Exception) -> str:
     return str(error).replace("\n", " ")[:1200]
@@ -1310,6 +1229,7 @@ async def document_handler(message: Message):
     try:
         filename, file_bytes = await download_telegram_document(message)
         question = message.caption or "Проанализируй файл и выдели главное."
+        await wait_message.edit_text(build_file_status_text(filename, "reading"))
 
         try:
             extracted_text = await asyncio.to_thread(extract_document_text, filename, file_bytes)
@@ -1346,7 +1266,7 @@ async def document_handler(message: Message):
                 )
                 return
         else:
-            await wait_message.edit_text("🧠 Анализирую файл...")
+            await wait_message.edit_text(build_file_status_text(filename, "analyzing"))
             answer = await file_router(selected_model, question, filename, extracted_text, history)
 
         if not answer:
