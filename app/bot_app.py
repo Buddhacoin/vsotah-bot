@@ -37,27 +37,6 @@ from app.ai.file_router import (
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
 from app.referrals import build_referral_link
-@router.message(Command("referral"))
-async def referral_command(message: Message):
-    bot_info = await message.bot.get_me()
-
-    referral_link = build_referral_link(
-        bot_info.username,
-        message.from_user.id,
-    )
-
-    text = (
-        "🎁 Реферальная программа VSotah AI\n\n"
-        "Приглашай друзей и получай бонусы.\n\n"
-        f"🔗 Твоя ссылка:\n{referral_link}\n\n"
-        "📊 В будущем здесь появятся:\n"
-        "• бонусы\n"
-        "• Stars rewards\n"
-        "• статистика приглашений\n"
-        "• partner levels"
-    )
-
-    await message.answer(text)
     
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
