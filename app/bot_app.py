@@ -122,6 +122,7 @@ dp = Dispatcher()
 
 db_pool = None
 recent_starts = {}
+_bot_username_cache = os.getenv("BOT_USERNAME") or None
 
 
 def no_preview():
@@ -180,21 +181,25 @@ def channels_menu():
 
 
 def referral_menu(bot_username: str, user_id: int):
+    referral_link = build_referral_link(bot_username, user_id)
+    share_url = build_telegram_share_url(referral_link)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📨 Пригласить друзей", callback_data="earn_invite")],
             [InlineKeyboardButton(text="🏆 Топ партнёров", callback_data="earn_top")],
             [InlineKeyboardButton(text="📊 Моя статистика", callback_data="earn_stats")],
-            [InlineKeyboardButton(text="📤 Текст для пересылки", callback_data="earn_share")],
+            [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
 
 
 def referral_back_menu(bot_username: str, user_id: int):
+    referral_link = build_referral_link(bot_username, user_id)
+    share_url = build_telegram_share_url(referral_link)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Текст для пересылки", callback_data="earn_share")],
+            [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
             [InlineKeyboardButton(text="← В партнёрку", callback_data="earn")],
             [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")],
         ]
@@ -623,8 +628,8 @@ async def get_referral_stats(telegram_id: int) -> dict:
 
 
 async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
-    bot_info = await bot_obj.get_me()
-    referral_link = build_referral_link(bot_info.username, user_id)
+    bot_username = await get_bot_username(bot_obj)
+    referral_link = build_referral_link(bot_username, user_id)
     stats = await get_referral_stats(user_id)
 
     return (
@@ -646,8 +651,8 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
 
 
 async def build_referral_invite_text(bot_obj: Bot, user_id: int) -> str:
-    bot_info = await bot_obj.get_me()
-    referral_link = build_referral_link(bot_info.username, user_id)
+    bot_username = await get_bot_username(bot_obj)
+    referral_link = build_referral_link(bot_username, user_id)
     invite_text = build_invite_text(referral_link)
     return (
         "📨 Пригласить друзей\n\n"
@@ -664,6 +669,15 @@ async def build_referral_stats_text(user_id: int) -> str:
         f"• Купили подписку: {stats['paid']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "Бонусы открываются по количеству приглашённых друзей."
+    )
+
+
+async def build_referral_bonuses_text(user_id: int) -> str:
+    stats = await get_referral_stats(user_id)
+    return (
+        "🎁 Мои бонусы\n\n"
+        f"Сейчас приглашено: {stats['invited']}\n"
+        f"Бонусов получено: {stats['rewards_count']}"
     )
 
 
@@ -1042,6 +1056,15 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
         )
 
 
+async def get_bot_username(bot_obj: Bot) -> str:
+    global _bot_username_cache
+    if _bot_username_cache:
+        return _bot_username_cache
+    bot_info = await bot_obj.get_me()
+    _bot_username_cache = bot_info.username
+    return _bot_username_cache
+
+
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     now = time.time()
@@ -1074,10 +1097,10 @@ async def account_command(message: Message):
 async def referral_command(message: Message):
     await get_or_create_user(message)
     await log_event(message.from_user.id, "referral_open")
-    bot_info = await message.bot.get_me()
+    bot_username = await get_bot_username(message.bot)
     await message.answer(
         await build_referral_text(message.bot, message.from_user.id),
-        reply_markup=referral_menu(bot_info.username, message.from_user.id),
+        reply_markup=referral_menu(bot_username, message.from_user.id),
     )
 
 
@@ -1151,66 +1174,65 @@ async def models_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "earn")
 async def earn_callback(callback: CallbackQuery):
-    await callback.answer()
+    await callback.answer(cache_time=1)
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_open")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_text(callback.bot, callback.from_user.id),
-        reply_markup=referral_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_menu(bot_username, callback.from_user.id),
     )
 
 
 @dp.callback_query(F.data == "earn_invite")
 async def earn_invite_callback(callback: CallbackQuery):
-    await callback.answer()
+    await callback.answer(cache_time=1)
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_invite")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_invite_text(callback.bot, callback.from_user.id),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
-    )
-
-
-@dp.callback_query(F.data == "earn_share")
-async def earn_share_callback(callback: CallbackQuery):
-    await callback.answer("Текст для пересылки отправлен ниже")
-    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-    await log_event(callback.from_user.id, "referral_share_text")
-    bot_info = await callback.bot.get_me()
-    referral_link = build_referral_link(bot_info.username, callback.from_user.id)
-    await callback.message.answer(
-        build_invite_text(referral_link),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
-        link_preview_options=no_preview(),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
 @dp.callback_query(F.data == "earn_top")
 async def earn_top_callback(callback: CallbackQuery):
-    await callback.answer()
+    await callback.answer(cache_time=1)
     await log_event(callback.from_user.id, "referral_top")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_leaderboard_text(),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
+    )
+
+
+@dp.callback_query(F.data == "earn_bonuses")
+async def earn_bonuses_callback(callback: CallbackQuery):
+    await callback.answer()
+    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    await log_event(callback.from_user.id, "referral_bonuses")
+    bot_username = await get_bot_username(callback.bot)
+    await safe_edit_or_send(
+        callback,
+        await build_referral_bonuses_text(callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
 @dp.callback_query(F.data == "earn_stats")
 async def earn_stats_callback(callback: CallbackQuery):
-    await callback.answer()
+    await callback.answer(cache_time=1)
     await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     await log_event(callback.from_user.id, "referral_stats")
-    bot_info = await callback.bot.get_me()
+    bot_username = await get_bot_username(callback.bot)
     await safe_edit_or_send(
         callback,
         await build_referral_stats_text(callback.from_user.id),
-        reply_markup=referral_back_menu(bot_info.username, callback.from_user.id),
+        reply_markup=referral_back_menu(bot_username, callback.from_user.id),
     )
 
 
@@ -1983,14 +2005,6 @@ async def chat_handler(message: Message):
             )
 
 
-@dp.callback_query()
-async def unknown_callback(callback: CallbackQuery):
-    try:
-        await callback.answer("Меню обновлено. Если кнопка старая — нажмите /start.")
-    except Exception:
-        pass
-
-
 async def health_handler(request):
     return web.json_response({"ok": True, "service": "vsotah-bot"})
 
@@ -2041,10 +2055,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
 
 
