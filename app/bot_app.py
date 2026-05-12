@@ -111,6 +111,29 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+@dp.message(Command("referral"))
+async def referral_command(message: Message):
+    bot_info = await message.bot.get_me()
+
+    referral_link = build_referral_link(
+        bot_info.username,
+        message.from_user.id,
+    )
+
+    text = (
+        "🎁 Реферальная программа VSotah AI\n\n"
+        "Приглашай друзей и получай бонусы.\n\n"
+        f"🔗 Твоя ссылка:\n{referral_link}\n\n"
+        "📊 В будущем здесь появятся:\n"
+        "• бонусы\n"
+        "• Stars rewards\n"
+        "• статистика приглашений\n"
+        "• partner levels"
+    )
+
+    await message.answer(text)
+
+
 db_pool = None
 recent_starts = {}
 
