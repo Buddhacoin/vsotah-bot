@@ -36,7 +36,7 @@ from app.ai.file_router import (
     build_file_status_text,
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
-from app.referrals import build_referral_link
+from app.referrals import build_referral_link, parse_referral_code
     
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -65,6 +65,7 @@ MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
 MAX_VOICE_SIZE = int(os.getenv("MAX_VOICE_SIZE", str(20 * 1024 * 1024)))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
 VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
 
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -111,29 +112,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
-@dp.message(Command("referral"))
-async def referral_command(message: Message):
-    bot_info = await message.bot.get_me()
-
-    referral_link = build_referral_link(
-        bot_info.username,
-        message.from_user.id,
-    )
-
-    text = (
-        "🎁 Реферальная программа VSotah AI\n\n"
-        "Приглашай друзей и получай бонусы.\n\n"
-        f"🔗 Твоя ссылка:\n{referral_link}\n\n"
-        "📊 В будущем здесь появятся:\n"
-        "• бонусы\n"
-        "• Stars rewards\n"
-        "• статистика приглашений\n"
-        "• partner levels"
-    )
-
-    await message.answer(text)
-
-
 db_pool = None
 recent_starts = {}
 
@@ -149,7 +127,10 @@ def main_menu():
                 InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
                 InlineKeyboardButton(text="💳 Купить подписку", callback_data="premium"),
             ],
-            [InlineKeyboardButton(text="🤖 Выбрать нейросеть", callback_data="models")],
+            [
+                InlineKeyboardButton(text="🤖 Выбрать нейросеть", callback_data="models"),
+                InlineKeyboardButton(text="💰 Заработать", callback_data="earn"),
+            ],
             [InlineKeyboardButton(text="🧠 Наши каналы", callback_data="channels")],
         ]
     )
@@ -403,6 +384,21 @@ async def init_db():
             );
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                referrer_id BIGINT NOT NULL,
+                referred_id BIGINT NOT NULL UNIQUE,
+                status TEXT DEFAULT 'registered',
+                paid_plan TEXT,
+                reward_status TEXT DEFAULT 'pending',
+                reward_details TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                paid_at TIMESTAMP
+            );
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON referrals(referrer_id);")
+
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
     try:
@@ -417,12 +413,82 @@ async def log_event(telegram_id: int | None, event_type: str, details: str = "")
         print(f"LOG EVENT ERROR: {e}")
 
 
+async def track_referral_start(referred_id: int, referrer_id: int | None):
+    if not referrer_id or referrer_id == referred_id:
+        return False
+
+    try:
+        async with db_pool.acquire() as conn:
+            existing_user = await conn.fetchrow("SELECT telegram_id FROM users WHERE telegram_id=$1", referred_id)
+            if existing_user:
+                return False
+
+            await conn.execute("""
+                INSERT INTO referrals (referrer_id, referred_id, status)
+                VALUES ($1, $2, 'registered')
+                ON CONFLICT (referred_id) DO NOTHING
+            """, referrer_id, referred_id)
+
+        await log_event(referred_id, "referral_registered", str(referrer_id))
+        return True
+    except Exception as e:
+        print(f"REFERRAL TRACK ERROR: {short_error_text(e)}")
+        return False
+
+
+async def mark_referral_paid(referred_id: int, plan: str):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE referrals
+                SET status='paid', paid_plan=$2, paid_at=NOW(), reward_details=$2
+                WHERE referred_id=$1 AND status <> 'paid'
+            """, referred_id, plan)
+        await log_event(referred_id, "referral_paid", plan)
+    except Exception as e:
+        print(f"REFERRAL PAID ERROR: {short_error_text(e)}")
+
+
+async def get_referral_stats(telegram_id: int) -> dict:
+    try:
+        async with db_pool.acquire() as conn:
+            invited = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", telegram_id)
+            paid = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='paid'", telegram_id)
+            pending_rewards = await conn.fetchval("""
+                SELECT COUNT(*) FROM referrals
+                WHERE referrer_id=$1 AND status='paid' AND reward_status='pending'
+            """, telegram_id)
+        return {"invited": invited or 0, "paid": paid or 0, "pending_rewards": pending_rewards or 0}
+    except Exception as e:
+        print(f"REFERRAL STATS ERROR: {short_error_text(e)}")
+        return {"invited": 0, "paid": 0, "pending_rewards": 0}
+
+
+async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
+    bot_info = await bot_obj.get_me()
+    referral_link = build_referral_link(bot_info.username, user_id)
+    stats = await get_referral_stats(user_id)
+
+    return (
+        "💰 Заработать с VSotah AI\n\n"
+        "Приглашай друзей по своей ссылке и получай бонусы внутри бота.\n\n"
+        f"🔗 Твоя ссылка:\n{referral_link}\n\n"
+        "📊 Твоя статистика:\n"
+        f"• Приглашено: {stats['invited']}\n"
+        f"• Купили подписку: {stats['paid']}\n"
+        f"• Бонусов ожидает: {stats['pending_rewards']}\n\n"
+        "🎁 На старте бонусы будут начисляться лимитами и Premium-днями.\n"
+        "⭐ Stars/денежные выплаты подключим позже, когда партнёрка пройдёт тест."
+    )
+
+
 async def setup_bot_info():
     await bot.set_my_commands([
         BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать нейросеть"),
+        BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ])
@@ -629,6 +695,13 @@ async def user_profile_text(user):
     if plan != "FREE" and user["plan_until"]:
         text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
 
+    referral_stats = await get_referral_stats(user["telegram_id"])
+    text += (
+        "💰 Заработать:\n"
+        f"• Приглашено: {referral_stats['invited']}\n"
+        f"• Купили подписку: {referral_stats['paid']}\n\n"
+    )
+
     text += (
         "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
         "⭐ PLUS — Claude Sonnet и 500 запросов в неделю\n"
@@ -680,9 +753,20 @@ def short_error_text(error: Exception) -> str:
 
 
 async def send_ai_error_to_admin(error_text: str):
+    # По умолчанию НЕ отправляем страшные API-ошибки в Telegram.
+    # Они остаются в Railway logs. Если нужно включить диагностику: ADMIN_ERROR_NOTIFICATIONS=true.
+    if not ADMIN_ERROR_NOTIFICATIONS:
+        return
+
+    friendly_text = (
+        "🛠 Диагностика VSotahBot\n\n"
+        "Один из AI-провайдеров временно вернул ошибку. Пользователь увидел мягкое сообщение.\n\n"
+        f"Технически: {error_text[:1500]}"
+    )
+
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, error_text[:3000])
+            await bot.send_message(admin_id, friendly_text)
         except Exception:
             pass
 
@@ -712,6 +796,9 @@ async def start_handler(message: Message):
         return
     recent_starts[message.from_user.id] = now
 
+    referrer_id = parse_referral_code(message.text or "")
+    await track_referral_start(message.from_user.id, referrer_id)
+
     user = await get_or_create_user(message)
     await log_event(message.from_user.id, "start")
     await message.answer(
@@ -727,6 +814,13 @@ async def account_command(message: Message):
     user = await get_or_create_user(message)
     await log_event(message.from_user.id, "account")
     await message.answer(await user_profile_text(user), reply_markup=main_menu())
+
+
+@dp.message(Command("referral"))
+async def referral_command(message: Message):
+    await get_or_create_user(message)
+    await log_event(message.from_user.id, "referral_open")
+    await message.answer(await build_referral_text(message.bot, message.from_user.id), reply_markup=main_menu())
 
 
 @dp.message(Command("premium"))
@@ -795,6 +889,14 @@ async def models_callback(callback: CallbackQuery):
         "Все базовые модели сейчас доступны бесплатно.",
         reply_markup=models_menu(),
     )
+
+
+@dp.callback_query(F.data == "earn")
+async def earn_callback(callback: CallbackQuery):
+    await callback.answer()
+    await get_or_create_user_by_data(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    await log_event(callback.from_user.id, "referral_open")
+    await safe_edit_or_send(callback, await build_referral_text(callback.bot, callback.from_user.id), reply_markup=main_menu())
 
 
 @dp.callback_query(F.data.startswith("tariff_"))
@@ -898,6 +1000,7 @@ async def successful_payment_handler(message: Message):
         )
 
     await activate_plan(message.from_user.id, plan, months)
+    await mark_referral_paid(message.from_user.id, plan)
     await message.answer(f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.", reply_markup=main_menu())
 
 
@@ -1165,8 +1268,10 @@ async def photo_handler(message: Message):
             edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
 
             if not edited_bytes:
+                print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
                 await wait_message.edit_text(
-                    text_note or "⚠️ Редактирование не вернуло изображение. Попробуйте другой запрос.",
+                    "⚠️ Редактирование изображений временно недоступно.\n\n"
+                    "Попробуйте позже или выберите другую нейросеть.",
                     reply_markup=main_menu(),
                 )
                 return
@@ -1473,8 +1578,10 @@ async def chat_handler(message: Message):
                 image_bytes, text_note = await generate_gpt_image(message.text)
 
             if not image_bytes:
+                print(f"IMAGE PROVIDER RETURNED NO IMAGE | {selected_model} | {(text_note or '')[:1000]}")
                 await wait_message.edit_text(
-                    text_note or "⚠️ Генерация не вернула изображение. Попробуйте другой запрос.",
+                    "⚠️ Генерация изображений временно недоступна.\n\n"
+                    "Попробуйте позже или выберите другую нейросеть.",
                     reply_markup=main_menu(),
                 )
                 return
@@ -1604,6 +1711,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
