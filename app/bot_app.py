@@ -2115,7 +2115,9 @@ async def chat_handler(message: Message):
                 )
             return
 
-    await bot.send_chat_action(message.chat.id, "typing")
+    # Не отправляем Telegram chat_action typing для обычного текста:
+    # на некоторых клиентах он может висеть сверху несколько секунд уже после ответа.
+    # Вместо этого используем собственное loading-сообщение, которое точно заменяется итоговым ответом.
     wait_message = await message.answer("🧠 VSotah AI думает...")
 
     try:
@@ -2127,7 +2129,6 @@ async def chat_handler(message: Message):
         except Exception:
             pass
 
-        await bot.send_chat_action(message.chat.id, "typing")
         answer = await ai_router(selected_model, history)
 
         if not answer:
