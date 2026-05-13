@@ -24,6 +24,10 @@ from aiogram.types import (
 
 from app.ai.router import (
     ai_router,
+    research_router,
+    business_router,
+    code_router,
+    web_router,
     vision_router,
     generate_nano_banana_image,
     generate_gpt_image,
@@ -834,6 +838,10 @@ async def setup_bot_info():
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
+        BotCommand(command="research", description="🔎 Deep Research"),
+        BotCommand(command="web", description="🌐 Live Web AI"),
+        BotCommand(command="business", description="💼 Business AI"),
+        BotCommand(command="code", description="💻 Code AI"),
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
@@ -1845,6 +1853,131 @@ async def setfree_handler(message: Message):
     await admin_set_plan(message, "FREE")
 
 
+
+async def run_work_ai_command(message: Message, mode: str, router_func, title: str, wait_text: str):
+    """AI Core Upgrade: serious work modes without adding heavy UI."""
+    raw_text = message.text or ""
+    prompt = raw_text.split(maxsplit=1)[1].strip() if len(raw_text.split(maxsplit=1)) > 1 else ""
+
+    if not prompt:
+        examples = {
+            "research": "Например: /research рынок Telegram AI-ботов в 2026 и как продвигать VSotahBot",
+            "business": "Например: /business напиши коммерческое предложение для рекламы VSotahBot в каналах",
+            "code": "Например: /code объясни ошибку Railway и предложи готовое исправление",
+            "web": "Например: /web последние новости OpenAI и Gemini сегодня",
+        }
+        await message.answer(
+            f"{title}\n\nНапишите запрос после команды.\n\n{examples.get(mode, '')}",
+            reply_markup=main_menu(),
+        )
+        return
+
+    user = await get_or_create_user(message)
+    spam_allowed, wait_seconds = await check_spam(message.from_user.id)
+    if not spam_allowed:
+        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
+        return
+
+    allowed, reason = await check_limit(user)
+    if not allowed:
+        await log_event(message.from_user.id, "limit_reached", reason)
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        return
+
+    selected_model = user["selected_model"]
+    if selected_model in {"nanobanana", "gptimage"}:
+        selected_model = "gpt"
+
+    if not has_model_access(user["plan"], selected_model):
+        selected_model = "gpt"
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
+
+    wait_message = await message.answer(wait_text)
+
+    try:
+        await save_message(message.from_user.id, "user", f"[{mode.upper()}] {prompt}")
+        history = await get_chat_history(message.from_user.id)
+
+        try:
+            await wait_message.edit_text("⚡ Собираю контекст и думаю...")
+        except Exception:
+            pass
+
+        answer = await router_func(selected_model, history)
+        if not answer:
+            answer = "⚠️ AI вернул пустой ответ. Попробуйте переформулировать запрос."
+
+        await save_message(message.from_user.id, "assistant", answer)
+        await increase_usage(message.from_user.id)
+        await log_event(message.from_user.id, f"ai_{mode}", selected_model)
+
+        if len(answer) <= 3900:
+            await wait_message.edit_text(answer)
+        else:
+            await wait_message.edit_text(answer[:3900])
+            for i in range(3900, len(answer), 3900):
+                await message.answer(answer[i:i + 3900])
+
+    except Exception as e:
+        admin_error = short_error_text(e)
+        print(f"{mode.upper()} AI ERROR SHORT:\n{admin_error}")
+        print(f"{mode.upper()} AI ERROR TRACE:\n{traceback.format_exc()}")
+        await log_event(message.from_user.id, f"{mode}_error", admin_error)
+        await send_ai_error_to_admin(f"⚠️ {mode.upper()} AI ERROR | {selected_model} | {admin_error}")
+        try:
+            await wait_message.edit_text(
+                "⚠️ Не удалось обработать запрос. Попробуйте позже или выберите другую нейросеть.",
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            await message.answer("⚠️ Не удалось обработать запрос.", reply_markup=main_menu())
+
+
+@dp.message(Command("research"))
+async def research_command(message: Message):
+    await run_work_ai_command(
+        message,
+        "research",
+        research_router,
+        "🔎 Deep Research Lite",
+        "🔎 Ищу и анализирую информацию...",
+    )
+
+
+@dp.message(Command("web"))
+async def web_command(message: Message):
+    await run_work_ai_command(
+        message,
+        "web",
+        web_router,
+        "🌐 Live Web AI",
+        "🌐 Проверяю актуальную информацию...",
+    )
+
+
+@dp.message(Command("business"))
+async def business_command(message: Message):
+    await run_work_ai_command(
+        message,
+        "business",
+        business_router,
+        "💼 Business AI",
+        "💼 Готовлю рабочий ответ...",
+    )
+
+
+@dp.message(Command("code"))
+async def code_command(message: Message):
+    await run_work_ai_command(
+        message,
+        "code",
+        code_router,
+        "💻 Code AI",
+        "💻 Анализирую код/ошибку...",
+    )
+
+
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     user = await get_or_create_user(message)
@@ -2381,6 +2514,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
 
 
 
