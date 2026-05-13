@@ -847,10 +847,6 @@ async def setup_bot_info():
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
-        BotCommand(command="research", description="🔎 Deep Research"),
-        BotCommand(command="web", description="🌐 Live Web AI"),
-        BotCommand(command="business", description="💼 Business AI"),
-        BotCommand(command="code", description="💻 Code AI"),
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
@@ -895,10 +891,6 @@ async def clear_start_for_chat(chat_id: int):
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
-        BotCommand(command="research", description="🔎 Deep Research"),
-        BotCommand(command="web", description="🌐 Live Web AI"),
-        BotCommand(command="business", description="💼 Business AI"),
-        BotCommand(command="code", description="💻 Code AI"),
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
@@ -1206,6 +1198,41 @@ async def send_ai_error_to_admin(error_text: str):
             pass
 
 
+async def animate_thinking(message: Message, base_text: str = "Печатает ответ"):
+    """Small Telegram-safe loading animation.
+    Telegram cannot do real particle dispersion inside a bubble, so we imitate it
+    with live dots and then quietly remove the loading bubble before final answer.
+    """
+    states = [f"{base_text}.", f"{base_text}..", f"{base_text}..."]
+    idx = 0
+    try:
+        while True:
+            await message.edit_text(states[idx % len(states)])
+            idx += 1
+            await asyncio.sleep(0.55)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+
+
+async def finish_loading_message(wait_message: Message):
+    # Имитация мягкого исчезновения: коротко убираем точки и удаляем loading.
+    try:
+        await wait_message.edit_text("...")
+        await asyncio.sleep(0.15)
+        await wait_message.edit_text("..")
+        await asyncio.sleep(0.12)
+        await wait_message.edit_text(".")
+        await asyncio.sleep(0.08)
+        await wait_message.delete()
+    except Exception:
+        try:
+            await wait_message.delete()
+        except Exception:
+            pass
+
+
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
     try:
         await callback.message.edit_text(
@@ -1225,15 +1252,10 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
+    # ВАЖНО: не удаляем сообщение /start.
+    # На некоторых клиентах Telegram это вызывает огромную синюю кнопку «Старт»,
+    # которая перекрывает поле ввода. Командное меню чистим отдельно.
     await clear_start_for_chat(message.chat.id)
-
-    # В приватном чате удаляем пользовательскую команду /start, чтобы она не висела
-    # под приветствием. Если Telegram не даст удалить — просто игнорируем.
-    if message.chat.type == "private":
-        try:
-            await message.delete()
-        except Exception:
-            pass
 
     now = time.time()
     last = recent_starts.get(message.from_user.id, 0)
@@ -2350,7 +2372,8 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
         history = await get_chat_history(message.from_user.id)
 
-        await wait_message.edit_text("✍️ Печатает ответ...")
+        await wait_message.edit_text("Печатает ответ...")
+        loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
         answer = await ai_router(selected_model, history)
 
         if not answer:
@@ -2359,13 +2382,22 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "assistant", answer)
         await log_event(message.from_user.id, "ai_voice_free", selected_model)
 
+        loading_task.cancel()
+        try:
+            await loading_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        await finish_loading_message(wait_message)
+
         # Пользователю не нужен технический блок "Распознал / Ответ".
         # Показываем сразу готовый ответ, как в обычном чате.
         response_text = answer
         if len(response_text) <= 3900:
-            await wait_message.edit_text(response_text)
+            await message.answer(response_text)
         else:
-            await wait_message.edit_text(response_text[:3900])
+            await message.answer(response_text[:3900])
             for i in range(3900, len(response_text), 3900):
                 await message.answer(response_text[i:i + 3900])
 
@@ -2487,18 +2519,14 @@ async def chat_handler(message: Message):
             return
 
     # Не отправляем Telegram chat_action typing для обычного текста:
-    # на некоторых клиентах он может висеть сверху несколько секунд уже после ответа.
-    # Вместо этого используем собственное loading-сообщение, которое точно заменяется итоговым ответом.
-    wait_message = await message.answer("✍️ Печатает ответ...")
+    # на некоторых клиентах он может висеть сверху уже после ответа.
+    # Вместо этого используем своё короткое loading-сообщение с живыми точками.
+    wait_message = await message.answer("Печатает ответ...")
+    loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
 
     try:
         await save_message(message.from_user.id, "user", message.text)
         history = await get_chat_history(message.from_user.id)
-
-        try:
-            await wait_message.edit_text("✍️ Печатает ответ...")
-        except Exception:
-            pass
 
         answer = await ai_router(selected_model, history)
 
@@ -2509,19 +2537,30 @@ async def chat_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_message", selected_model)
 
+        loading_task.cancel()
         try:
-            await wait_message.edit_text("✅ Готово")
+            await loading_task
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
+        await finish_loading_message(wait_message)
 
         if len(answer) <= 3900:
-            await wait_message.edit_text(answer)
+            await message.answer(answer)
         else:
-            await wait_message.edit_text(answer[:3900])
+            await message.answer(answer[:3900])
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
+        loading_task.cancel()
+        try:
+            await loading_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
         admin_error = short_error_text(e)
         print(f"AI ERROR SHORT:\n{admin_error}")
         print(f"AI ERROR TRACE:\n{traceback.format_exc()}")
