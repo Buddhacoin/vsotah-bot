@@ -64,7 +64,7 @@ AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
 MAX_VOICE_SIZE = int(os.getenv("MAX_VOICE_SIZE", str(20 * 1024 * 1024)))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
-VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
 
 PORT = int(os.getenv("PORT", "8080"))
@@ -1483,6 +1483,8 @@ async def admin_handler(message: Message):
         "/users — последние пользователи\n"
         "/payments — платежи\n"
         "/refstats — партнёрка\n"
+        "/health — статус сервиса\n"
+        "/errors — ошибки и лимиты\n"
         "/setplus telegram_id\n"
         "/setpro telegram_id\n"
         "/setvip telegram_id\n"
@@ -2062,6 +2064,12 @@ async def document_handler(message: Message):
 
 @dp.message(F.voice)
 async def voice_handler(message: Message):
+    """Voice AI 2.0: free voice assistant for all users.
+
+    Voice messages do not consume daily/weekly request limits.
+    Text answer is always returned; voice reply is enabled by default and can be disabled
+    with VOICE_REPLY_ENABLED=false in Railway Variables.
+    """
     user = await get_or_create_user(message)
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
@@ -2069,27 +2077,15 @@ async def voice_handler(message: Message):
         await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
         return
 
-    allowed, reason = await check_limit(user)
-    if not allowed:
-        await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
-        return
-
     selected_model = user["selected_model"]
     if selected_model in {"nanobanana", "gptimage"}:
-        await message.answer(
-            "🎙 Для голосового общения выберите ChatGPT, Claude или Gemini в меню «Выбрать AI».",
-            reply_markup=main_menu(),
-        )
-        return
+        selected_model = "gpt"
 
     if not has_model_access(user["plan"], selected_model):
         selected_model = "gpt"
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
-        await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
-        )
+        await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT — GPT-4o mini.")
 
     wait_message = await message.answer("🎙 Слушаю голосовое...")
 
@@ -2116,10 +2112,13 @@ async def voice_handler(message: Message):
             answer = "⚠️ AI вернул пустой ответ. Попробуйте записать вопрос ещё раз."
 
         await save_message(message.from_user.id, "assistant", answer)
-        await increase_usage(message.from_user.id)
-        await log_event(message.from_user.id, "ai_voice", selected_model)
+        await log_event(message.from_user.id, "ai_voice_free", selected_model)
 
-        response_text = f"🎙 Распознал:\n{transcript}\n\nОтвет:\n{answer}"
+        response_text = (
+            "🎙 Voice AI 2.0\n\n"
+            f"📝 Распознал:\n{transcript}\n\n"
+            f"💬 Ответ:\n{answer}"
+        )
         if len(response_text) <= 3900:
             await wait_message.edit_text(response_text)
         else:
@@ -2129,11 +2128,13 @@ async def voice_handler(message: Message):
 
         if VOICE_REPLY_ENABLED:
             try:
+                await message.answer("🔊 Готовлю голосовой ответ...")
                 audio_reply = await text_to_speech(answer)
                 if audio_reply:
                     audio = BufferedInputFile(audio_reply, filename="vsotah_voice_reply.mp3")
-                    await message.answer_audio(audio=audio, caption="🔊 Голосовой ответ VSotah AI")
+                    await message.answer_voice(voice=audio, caption="🔊 Голосовой ответ VSotah AI")
             except Exception as voice_reply_error:
+                await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
                 print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
 
     except ValueError as e:
