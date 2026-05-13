@@ -10,8 +10,11 @@ OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "whisper-1")
 OPENAI_STT_LANGUAGE = os.getenv("OPENAI_STT_LANGUAGE", "").strip()
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
+OPENAI_TTS_FORMAT = os.getenv("OPENAI_TTS_FORMAT", "opus")
 VOICE_TRANSCRIPT_LIMIT = int(os.getenv("VOICE_TRANSCRIPT_LIMIT", "5000"))
-VOICE_TTS_TEXT_LIMIT = int(os.getenv("VOICE_TTS_TEXT_LIMIT", "1800"))
+# Voice replies must be short: Telegram users already received the full text answer.
+# Shorter TTS is much faster on Railway and uploads back to Telegram quicker.
+VOICE_TTS_TEXT_LIMIT = int(os.getenv("VOICE_TTS_TEXT_LIMIT", "700"))
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -29,6 +32,24 @@ def _clip_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "…"
+
+
+def _clean_tts_text(text: str) -> str:
+    """Make AI answer shorter and easier for speech synthesis."""
+    text = _safe_text(text)
+    replacements = {
+        "**": "",
+        "__": "",
+        "```": "",
+        "###": "",
+        "##": "",
+        "#": "",
+        "•": "-",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n".join(lines)
 
 
 async def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> str:
@@ -61,7 +82,7 @@ async def text_to_speech(text: str) -> bytes:
     if not openai_client:
         raise VoiceProviderUnavailable("OPENAI_API_KEY is missing")
 
-    speech_text = _clip_text(text, VOICE_TTS_TEXT_LIMIT)
+    speech_text = _clip_text(_clean_tts_text(text), VOICE_TTS_TEXT_LIMIT)
     if not speech_text:
         return b""
 
@@ -69,7 +90,7 @@ async def text_to_speech(text: str) -> bytes:
         model=OPENAI_TTS_MODEL,
         voice=OPENAI_TTS_VOICE,
         input=speech_text,
-        response_format="mp3",
+        response_format=OPENAI_TTS_FORMAT,
     )
 
     if hasattr(response, "aread"):
