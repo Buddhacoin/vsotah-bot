@@ -183,6 +183,111 @@ def detect_crypto_symbols(text: str) -> list[tuple[str, str]]:
     return found[:4]
 
 
+BINANCE_SYMBOLS = {
+    "bitcoin": "BTCUSDT",
+    "ethereum": "ETHUSDT",
+    "solana": "SOLUSDT",
+    "toncoin": "TONUSDT",
+    "binancecoin": "BNBUSDT",
+    "ripple": "XRPUSDT",
+    "dogecoin": "DOGEUSDT",
+}
+
+
+def _fmt_money(value: Any, currency: str = "USD") -> str:
+    try:
+        number = float(value)
+    except Exception:
+        return "н/д"
+    if currency == "USD":
+        return f"${number:,.2f}"
+    if currency == "RUB":
+        return f"{number:,.0f} ₽".replace(",", " ")
+    if currency == "EUR":
+        return f"€{number:,.2f}"
+    return f"{number:,.2f}"
+
+
+async def fetch_crypto_price_answer(query: str) -> str:
+    """Return a direct user-ready crypto price answer without waiting for an LLM.
+
+    This makes simple questions like “Какая сейчас цена биткоина?” fast and reliable.
+    It first tries CoinGecko for USD/RUB/EUR and falls back to Binance USD ticker.
+    """
+    coins = detect_crypto_symbols(query)
+    if not coins:
+        return ""
+
+    ids = ",".join(coin_id for coin_id, _ in coins)
+
+    # 1) CoinGecko: gives USD/RUB/EUR and 24h change without an API key.
+    try:
+        data = await _get_json(
+            "https://api.coingecko.com/api/v3/simple/price",
+            {"Accept": "application/json"},
+            {
+                "ids": ids,
+                "vs_currencies": "usd,rub,eur",
+                "include_24hr_change": "true",
+                "include_last_updated_at": "true",
+            },
+        )
+        lines = ["📈 Актуальная цена криптовалюты:\n"]
+        has_price = False
+        for coin_id, name in coins:
+            item = data.get(coin_id) or {}
+            if not item.get("usd"):
+                continue
+            has_price = True
+            change = item.get("usd_24h_change")
+            change_text = ""
+            if change is not None:
+                sign = "+" if float(change) >= 0 else ""
+                change_text = f"\n• Изменение за 24ч: {sign}{float(change):.2f}%"
+            lines.append(
+                f"• {name}: {_fmt_money(item.get('usd'), 'USD')}"
+                f" / {_fmt_money(item.get('rub'), 'RUB')}"
+                f" / {_fmt_money(item.get('eur'), 'EUR')}"
+                f"{change_text}"
+            )
+        if has_price:
+            lines.append("\nЦена ориентировочная и может быстро меняться. Источник: CoinGecko.")
+            return "\n".join(lines)
+    except Exception as e:
+        print(f"CRYPTO DIRECT COINGECKO ERROR: {short_error_text(e)}")
+
+    # 2) Binance fallback: very fast for USD/USDT quotes.
+    lines = ["📈 Актуальная цена криптовалюты:\n"]
+    has_price = False
+    for coin_id, name in coins:
+        symbol = BINANCE_SYMBOLS.get(coin_id)
+        if not symbol:
+            continue
+        try:
+            data = await _get_json(
+                "https://api.binance.com/api/v3/ticker/24hr",
+                {"Accept": "application/json"},
+                {"symbol": symbol},
+            )
+            price = data.get("lastPrice")
+            change = data.get("priceChangePercent")
+            if not price:
+                continue
+            has_price = True
+            sign = "+" if change is not None and float(change) >= 0 else ""
+            lines.append(
+                f"• {name}: {_fmt_money(price, 'USD')}"
+                f"\n• Изменение за 24ч: {sign}{float(change):.2f}%"
+            )
+        except Exception as e:
+            print(f"CRYPTO DIRECT BINANCE ERROR {symbol}: {short_error_text(e)}")
+    if has_price:
+        lines.append("\nЦена ориентировочная и может быстро меняться. Источник: Binance.")
+        return "\n".join(lines)
+
+    return ""
+
+
 async def fetch_crypto_price_context(query: str) -> str:
     coins = detect_crypto_symbols(query)
     if not coins:
@@ -236,35 +341,89 @@ async def _get_json(url: str, headers: dict, params: dict) -> dict:
             return await response.json()
 
 
+def infer_tavily_topic(query: str) -> str:
+    t = (query or "").lower()
+    finance_markers = [
+        "цена", "курс", "стоимость", "акции", "биржа", "крипт", "битко", "bitcoin",
+        "btc", "ethereum", "eth", "доллар", "евро", "рубль", "market", "stock", "price", "finance",
+    ]
+    news_markers = ["новост", "сегодня", "последн", "событ", "что произошло", "latest", "news", "today"]
+    if any(x in t for x in finance_markers):
+        return "finance"
+    if any(x in t for x in news_markers):
+        return "news"
+    return "general"
+
+
+def infer_tavily_time_range(query: str) -> str | None:
+    t = (query or "").lower()
+    if any(x in t for x in ["сегодня", "сейчас", "за день", "24ч", "today", "now", "latest"]):
+        return "day"
+    if any(x in t for x in ["недел", "за неделю", "week"]):
+        return "week"
+    if any(x in t for x in ["месяц", "month"]):
+        return "month"
+    return None
+
+
 async def search_web(query: str) -> list[dict]:
-    """Returns normalized search results: title, url, snippet."""
+    """Returns normalized search results: title, url, snippet.
+
+    Tavily is the primary provider. The current Tavily API requires Bearer auth;
+    keeping the API key only in JSON silently fails on newer accounts.
+    """
     query = normalize_search_query(query)
     if not query or not WEB_SEARCH_ENABLED:
         return []
 
     try:
         if TAVILY_API_KEY:
+            payload = {
+                "query": query,
+                "search_depth": "fast",
+                "topic": infer_tavily_topic(query),
+                "max_results": WEB_SEARCH_MAX_RESULTS,
+                "include_answer": "basic",
+                "include_raw_content": False,
+                "include_images": False,
+                "include_favicon": False,
+            }
+            time_range = infer_tavily_time_range(query)
+            if time_range:
+                payload["time_range"] = time_range
+
             data = await _post_json(
                 "https://api.tavily.com/search",
-                {"Content-Type": "application/json"},
                 {
-                    "api_key": TAVILY_API_KEY,
-                    "query": query,
-                    "search_depth": "basic",
-                    "max_results": WEB_SEARCH_MAX_RESULTS,
-                    "include_answer": False,
-                    "include_raw_content": False,
+                    "Authorization": f"Bearer {TAVILY_API_KEY}",
+                    "Content-Type": "application/json",
                 },
+                payload,
             )
-            return [
-                {
+
+            normalized: list[dict] = []
+            answer = (data.get("answer") or "").strip()
+            if answer:
+                normalized.append({
+                    "title": "Tavily краткий ответ",
+                    "url": "",
+                    "snippet": answer,
+                    "kind": "answer",
+                })
+
+            for item in data.get("results", [])[:WEB_SEARCH_MAX_RESULTS]:
+                url = item.get("url") or ""
+                content = item.get("content") or item.get("snippet") or ""
+                if not url and not content:
+                    continue
+                normalized.append({
                     "title": item.get("title") or "Источник",
-                    "url": item.get("url") or "",
-                    "snippet": item.get("content") or item.get("snippet") or "",
-                }
-                for item in data.get("results", [])[:WEB_SEARCH_MAX_RESULTS]
-                if item.get("url")
-            ]
+                    "url": url,
+                    "snippet": content,
+                    "score": item.get("score"),
+                    "kind": "source",
+                })
+            return normalized
 
         if SERPER_API_KEY:
             data = await _post_json(
@@ -309,13 +468,23 @@ async def search_web(query: str) -> list[dict]:
 def render_web_context(results: list[dict]) -> str:
     if not results:
         return ""
-    lines = ["LIVE WEB CONTEXT. Use only if relevant. Mention source names/links in the answer when relying on them."]
-    for idx, item in enumerate(results, start=1):
+    lines = [
+        "LIVE WEB CONTEXT FROM TAVILY/SEARCH. Use this context for актуальные данные.",
+        "Answer in the user's language. Do not mention API keys, Railway, admin settings, or internal tools.",
+        "When relying on sources, add a short 'Источники:' section with source titles and URLs.",
+    ]
+    answer_items = [item for item in results if item.get("kind") == "answer"]
+    source_items = [item for item in results if item.get("kind") != "answer"]
+    for item in answer_items[:1]:
+        snippet = (item.get("snippet") or "").strip()
+        if snippet:
+            lines.append(f"TAVILY_SHORT_ANSWER:\n{snippet}")
+    for idx, item in enumerate(source_items, start=1):
         title = (item.get("title") or "Источник").strip()
         url = (item.get("url") or "").strip()
         snippet = (item.get("snippet") or "").strip()
         lines.append(f"[{idx}] {title}\nURL: {url}\nSnippet: {snippet}")
-    return "\n\n".join(lines)[:6500]
+    return "\n\n".join(lines)[:7500]
 
 
 def mode_instruction(mode: str) -> str:
@@ -336,8 +505,9 @@ def mode_instruction(mode: str) -> str:
         )
     if mode == "web":
         return (
-            "Ты AI с live web context. Если есть источники, отделяй факты из источников от своих выводов. "
-            "Если live web не настроен или результатов нет, честно скажи, что актуальный поиск недоступен."
+            "Ты AI с live web context. Сначала используй найденный web-контекст, потом свои выводы. "
+            "Отвечай прямо и полезно. Если есть источники — добавь короткий блок 'Источники'. "
+            "Никогда не говори пользователю про API key, админа, Railway или настройки."
         )
     return ""
 
@@ -502,13 +672,32 @@ async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str
 
 async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat", force_web: bool = False) -> str:
     mode = (mode or "chat").lower()
+
+    # Fast direct market-data answer for simple crypto price questions.
+    # This avoids vague LLM responses like “I do not have access”.
+    direct_crypto_answer = await fetch_crypto_price_answer(latest_user_text(messages))
+    if direct_crypto_answer:
+        return direct_crypto_answer
+
     messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=force_web or mode in {"web", "research"})
-    memory = build_memory(messages, limit=TEXT_HISTORY_LIMIT)
+
+    # Important: web context is stored as system messages. OpenAI can consume these directly,
+    # but Claude/Gemini paths use a separate system prompt. Move system-context into
+    # base_system so every provider receives the live web data.
+    system_contexts = [
+        (msg.get("content") or "").strip()
+        for msg in messages
+        if msg.get("role") == "system" and (msg.get("content") or "").strip()
+    ]
+    dialogue_messages = [msg for msg in messages if msg.get("role") != "system"]
+    memory = build_memory(dialogue_messages, limit=TEXT_HISTORY_LIMIT)
 
     base_system = system_prompt(get_personality(selected_model))
     extra = mode_instruction(mode)
     if extra:
         base_system = f"{base_system}\n\n{extra}"
+    if system_contexts:
+        base_system = f"{base_system}\n\n" + "\n\n".join(system_contexts[-3:])
     # модель должна честно сказать об этом, а не выдумывать свежие факты.
     if web_requested and not web_ready and (mode in {"web", "research"} or wants_live_web(latest_user_text(messages))):
         base_system = (
