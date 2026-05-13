@@ -161,6 +161,65 @@ def web_is_configured() -> bool:
     return bool(TAVILY_API_KEY or SERPER_API_KEY or BRAVE_SEARCH_API_KEY)
 
 
+def detect_crypto_symbols(text: str) -> list[tuple[str, str]]:
+    """Detect common crypto price questions and return CoinGecko ids with display names."""
+    t = (text or "").lower()
+    pairs = [
+        ("bitcoin", "Bitcoin", ["bitcoin", "биткоин", "биткойн", "btc", "бтс"]),
+        ("ethereum", "Ethereum", ["ethereum", "эфир", "эфириум", "eth"]),
+        ("solana", "Solana", ["solana", "солана", "sol"]),
+        ("toncoin", "Toncoin", ["toncoin", "ton", "тонкоин", "тон"]),
+        ("binancecoin", "BNB", ["bnb", "бинанс", "binance coin"]),
+        ("ripple", "XRP", ["xrp", "ripple", "рипл"]),
+        ("dogecoin", "Dogecoin", ["doge", "dogecoin", "догикоин"]),
+    ]
+    found: list[tuple[str, str]] = []
+    price_words = ["цена", "стоимость", "курс", "сколько стоит", "price", "cost", "rate"]
+    if not any(w in t for w in price_words):
+        return []
+    for coin_id, name, aliases in pairs:
+        if any(alias in t for alias in aliases):
+            found.append((coin_id, name))
+    return found[:4]
+
+
+async def fetch_crypto_price_context(query: str) -> str:
+    coins = detect_crypto_symbols(query)
+    if not coins:
+        return ""
+    ids = ",".join(coin_id for coin_id, _ in coins)
+    try:
+        data = await _get_json(
+            "https://api.coingecko.com/api/v3/simple/price",
+            {"Accept": "application/json"},
+            {
+                "ids": ids,
+                "vs_currencies": "usd,rub,eur",
+                "include_24hr_change": "true",
+                "include_last_updated_at": "true",
+            },
+        )
+        lines = [
+            "LIVE MARKET CONTEXT. Use this for current crypto prices. Source: CoinGecko simple price API. "
+            "Tell the user prices are approximate and can change quickly."
+        ]
+        for coin_id, name in coins:
+            item = data.get(coin_id) or {}
+            if not item:
+                continue
+            usd = item.get("usd")
+            rub = item.get("rub")
+            eur = item.get("eur")
+            change = item.get("usd_24h_change")
+            updated = item.get("last_updated_at")
+            line = f"{name}: USD={usd}; RUB={rub}; EUR={eur}; 24h_change_usd_percent={change}; last_updated_unix={updated}"
+            lines.append(line)
+        return "\n".join(lines) if len(lines) > 1 else ""
+    except Exception as e:
+        print(f"CRYPTO PRICE ERROR: {short_error_text(e)}")
+        return ""
+
+
 async def _post_json(url: str, headers: dict, payload: dict) -> dict:
     timeout = aiohttp.ClientTimeout(total=WEB_SEARCH_TIMEOUT)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -289,17 +348,33 @@ async def enrich_messages_with_web(messages: list[dict], force_web: bool = False
     if not should_search:
         return messages, False, False
 
+    # For crypto prices, use a direct market-data endpoint first. It is faster and more precise than generic search.
+    crypto_context = await fetch_crypto_price_context(query)
+    if crypto_context:
+        return [{"role": "system", "content": crypto_context}, *messages], True, True
+
     if not web_is_configured():
         notice = (
-            "LIVE WEB SEARCH REQUESTED, BUT NO SEARCH API KEY IS CONFIGURED. "
-            "Do not pretend to have checked the internet. Explain that live search needs TAVILY_API_KEY, SERPER_API_KEY or BRAVE_SEARCH_API_KEY."
+            "LIVE WEB SEARCH REQUESTED, BUT ONLINE SEARCH IS NOT AVAILABLE IN THIS RUNTIME. "
+            "Do not mention API keys, admin settings, Tavily, Serper, Brave, Railway, or configuration to the user. "
+            "Give a helpful normal answer if possible. If fresh facts are essential, say briefly in Russian: "
+            "'Сейчас я не могу проверить актуальные онлайн-данные.'"
         )
         return [{"role": "system", "content": notice}, *messages], True, False
 
     results = await search_web(query)
     context = render_web_context(results)
     if not context:
-        return [{"role": "system", "content": "Live web search returned no usable results. Say this honestly if current data is required."}, *messages], True, False
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Live web search returned no usable results. Do not mention APIs or admin settings. "
+                    "If current data is required, say briefly that online results were not found and give the best general guidance."
+                ),
+            },
+            *messages,
+        ], True, False
     return [{"role": "system", "content": context}, *messages], True, True
 
 def provider_order(selected_model: str, task: str = "text") -> list[str]:
@@ -438,8 +513,9 @@ async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat
     if web_requested and not web_ready and (mode in {"web", "research"} or wants_live_web(latest_user_text(messages))):
         base_system = (
             f"{base_system}\n\n"
-            "Важное правило: пользователь просит актуальные/live данные, но live web search не настроен. "
-            "Не придумывай свежие новости, цены, расписания или законы. Скажи, что для live-поиска администратору нужно добавить search API key."
+            "Важное правило: пользователь просит актуальные/live данные, но актуальный онлайн-поиск сейчас недоступен или не дал результатов. "
+            "Не придумывай свежие новости, цены, расписания или законы. Не упоминай API, ключи, администратора, Railway или технические настройки. "
+            "Ответь полезно обычным языком; если без свежих данных нельзя, коротко скажи: сейчас я не могу проверить актуальные онлайн-данные."
         )
 
     openai_messages = normalize_openai_messages([{"role": "system", "content": base_system}, *memory])
