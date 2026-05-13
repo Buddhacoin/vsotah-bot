@@ -1,8 +1,12 @@
 import asyncio
 import base64
+import json
 import os
+import re
 from io import BytesIO
 from typing import Any, Callable, Coroutine
+
+import aiohttp
 
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
@@ -45,6 +49,20 @@ TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
+
+# AI Core Upgrade: рабочие режимы и live-web/research слой.
+# Live web включается только если в Railway добавлен один из ключей:
+# TAVILY_API_KEY, SERPER_API_KEY или BRAVE_SEARCH_API_KEY.
+WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "12"))
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
+
+RESEARCH_MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS", "1800"))
+BUSINESS_MAX_TOKENS = int(os.getenv("BUSINESS_MAX_TOKENS", "1600"))
+CODE_MAX_TOKENS = int(os.getenv("CODE_MAX_TOKENS", "1800"))
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
@@ -112,6 +130,177 @@ def messages_to_plain_text(messages: list[dict]) -> str:
             lines.append(f"{role}: {content}")
     return "\n".join(lines)
 
+
+
+def latest_user_text(messages: list[dict]) -> str:
+    for msg in reversed(messages or []):
+        if msg.get("role") == "user" and msg.get("content"):
+            return str(msg.get("content", "")).strip()
+    return ""
+
+
+def normalize_search_query(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    text = re.sub(r"^/(research|web|search|business|code)\s+", "", text, flags=re.I)
+    return text[:450]
+
+
+def wants_live_web(text: str) -> bool:
+    """Lightweight detector for current-data questions. No web call without provider API key."""
+    t = (text or "").lower()
+    current_markers = [
+        "сегодня", "сейчас", "актуаль", "последн", "новост", "курс", "цена", "стоимость",
+        "расписан", "погода", "закон", "2026", "2025", "latest", "today", "now", "news",
+        "current", "price", "schedule", "weather", "release", "обновлен", "изменил",
+    ]
+    web_verbs = ["найди", "посмотри", "проверь", "поищи", "загугли", "в интернете", "источники", "ссылки", "research"]
+    return any(m in t for m in current_markers) or any(v in t for v in web_verbs)
+
+
+def web_is_configured() -> bool:
+    return bool(TAVILY_API_KEY or SERPER_API_KEY or BRAVE_SEARCH_API_KEY)
+
+
+async def _post_json(url: str, headers: dict, payload: dict) -> dict:
+    timeout = aiohttp.ClientTimeout(total=WEB_SEARCH_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers, json=payload) as response:
+            response.raise_for_status()
+            return await response.json()
+
+
+async def _get_json(url: str, headers: dict, params: dict) -> dict:
+    timeout = aiohttp.ClientTimeout(total=WEB_SEARCH_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, headers=headers, params=params) as response:
+            response.raise_for_status()
+            return await response.json()
+
+
+async def search_web(query: str) -> list[dict]:
+    """Returns normalized search results: title, url, snippet."""
+    query = normalize_search_query(query)
+    if not query or not WEB_SEARCH_ENABLED:
+        return []
+
+    try:
+        if TAVILY_API_KEY:
+            data = await _post_json(
+                "https://api.tavily.com/search",
+                {"Content-Type": "application/json"},
+                {
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "search_depth": "basic",
+                    "max_results": WEB_SEARCH_MAX_RESULTS,
+                    "include_answer": False,
+                    "include_raw_content": False,
+                },
+            )
+            return [
+                {
+                    "title": item.get("title") or "Источник",
+                    "url": item.get("url") or "",
+                    "snippet": item.get("content") or item.get("snippet") or "",
+                }
+                for item in data.get("results", [])[:WEB_SEARCH_MAX_RESULTS]
+                if item.get("url")
+            ]
+
+        if SERPER_API_KEY:
+            data = await _post_json(
+                "https://google.serper.dev/search",
+                {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                {"q": query, "num": WEB_SEARCH_MAX_RESULTS},
+            )
+            organic = data.get("organic", []) or []
+            return [
+                {
+                    "title": item.get("title") or "Источник",
+                    "url": item.get("link") or "",
+                    "snippet": item.get("snippet") or "",
+                }
+                for item in organic[:WEB_SEARCH_MAX_RESULTS]
+                if item.get("link")
+            ]
+
+        if BRAVE_SEARCH_API_KEY:
+            data = await _get_json(
+                "https://api.search.brave.com/res/v1/web/search",
+                {"X-Subscription-Token": BRAVE_SEARCH_API_KEY, "Accept": "application/json"},
+                {"q": query, "count": WEB_SEARCH_MAX_RESULTS},
+            )
+            results = ((data.get("web") or {}).get("results") or [])[:WEB_SEARCH_MAX_RESULTS]
+            return [
+                {
+                    "title": item.get("title") or "Источник",
+                    "url": item.get("url") or "",
+                    "snippet": item.get("description") or "",
+                }
+                for item in results
+                if item.get("url")
+            ]
+    except Exception as e:
+        print(f"WEB SEARCH ERROR: {short_error_text(e)}")
+        return []
+
+    return []
+
+
+def render_web_context(results: list[dict]) -> str:
+    if not results:
+        return ""
+    lines = ["LIVE WEB CONTEXT. Use only if relevant. Mention source names/links in the answer when relying on them."]
+    for idx, item in enumerate(results, start=1):
+        title = (item.get("title") or "Источник").strip()
+        url = (item.get("url") or "").strip()
+        snippet = (item.get("snippet") or "").strip()
+        lines.append(f"[{idx}] {title}\nURL: {url}\nSnippet: {snippet}")
+    return "\n\n".join(lines)[:6500]
+
+
+def mode_instruction(mode: str) -> str:
+    if mode == "research":
+        return (
+            "Ты Deep Research Lite внутри Telegram. Дай структурированный отчёт: краткий вывод, факты, "
+            "практические выводы, риски/ограничения и источники, если они есть. Не растягивай без пользы."
+        )
+    if mode == "business":
+        return (
+            "Ты бизнес-ассистент. Помогай с КП, письмами, договорами, продажами, стратегией, таблицами, "
+            "операционкой и анализом. Ответ должен быть практичным, с готовыми формулировками и следующим шагом."
+        )
+    if mode == "code":
+        return (
+            "Ты senior code assistant. Помогай с Python, Telegram bots, Railway, GitHub и API. "
+            "Давай готовые файлы/команды, объясняй ошибки коротко и точно, не ломай существующую архитектуру."
+        )
+    if mode == "web":
+        return (
+            "Ты AI с live web context. Если есть источники, отделяй факты из источников от своих выводов. "
+            "Если live web не настроен или результатов нет, честно скажи, что актуальный поиск недоступен."
+        )
+    return ""
+
+
+async def enrich_messages_with_web(messages: list[dict], force_web: bool = False) -> tuple[list[dict], bool, bool]:
+    query = latest_user_text(messages)
+    should_search = force_web or wants_live_web(query)
+    if not should_search:
+        return messages, False, False
+
+    if not web_is_configured():
+        notice = (
+            "LIVE WEB SEARCH REQUESTED, BUT NO SEARCH API KEY IS CONFIGURED. "
+            "Do not pretend to have checked the internet. Explain that live search needs TAVILY_API_KEY, SERPER_API_KEY or BRAVE_SEARCH_API_KEY."
+        )
+        return [{"role": "system", "content": notice}, *messages], True, False
+
+    results = await search_web(query)
+    context = render_web_context(results)
+    if not context:
+        return [{"role": "system", "content": "Live web search returned no usable results. Say this honestly if current data is required."}, *messages], True, False
+    return [{"role": "system", "content": context}, *messages], True, True
 
 def provider_order(selected_model: str, task: str = "text") -> list[str]:
     """
@@ -236,18 +425,56 @@ async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str
     return await asyncio.to_thread(run_gemini)
 
 
-async def ai_router(selected_model: str, messages: list[dict]) -> str:
+async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat", force_web: bool = False) -> str:
+    mode = (mode or "chat").lower()
+    messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=force_web or mode in {"web", "research"})
     memory = build_memory(messages, limit=TEXT_HISTORY_LIMIT)
-    system_text = system_prompt(get_personality(selected_model))
-    openai_messages = normalize_openai_messages([{"role": "system", "content": system_text}, *memory])
+
+    base_system = system_prompt(get_personality(selected_model))
+    extra = mode_instruction(mode)
+    if extra:
+        base_system = f"{base_system}\n\n{extra}"
+    # модель должна честно сказать об этом, а не выдумывать свежие факты.
+    if web_requested and not web_ready and (mode in {"web", "research"} or wants_live_web(latest_user_text(messages))):
+        base_system = (
+            f"{base_system}\n\n"
+            "Важное правило: пользователь просит актуальные/live данные, но live web search не настроен. "
+            "Не придумывай свежие новости, цены, расписания или законы. Скажи, что для live-поиска администратору нужно добавить search API key."
+        )
+
+    openai_messages = normalize_openai_messages([{"role": "system", "content": base_system}, *memory])
+
+    max_tokens = TEXT_MAX_TOKENS
+    if mode == "research":
+        max_tokens = RESEARCH_MAX_TOKENS
+    elif mode == "business":
+        max_tokens = BUSINESS_MAX_TOKENS
+    elif mode == "code":
+        max_tokens = CODE_MAX_TOKENS
 
     calls = {
-        "openai": lambda: openai_chat(openai_messages, OPENAI_TEXT_MODEL, TEXT_MAX_TOKENS, 0.45),
-        "anthropic": lambda: anthropic_chat(system_text, memory, ANTHROPIC_TEXT_MODEL, TEXT_MAX_TOKENS, 0.45),
-        "gemini": lambda: gemini_chat(system_text, memory, GEMINI_TEXT_MODEL),
-        "deepseek": lambda: deepseek_chat(openai_messages, TEXT_MAX_TOKENS, 0.45),
+        "openai": lambda: openai_chat(openai_messages, OPENAI_TEXT_MODEL, max_tokens, 0.35 if mode in {"research", "code"} else 0.45),
+        "anthropic": lambda: anthropic_chat(base_system, memory, ANTHROPIC_TEXT_MODEL, max_tokens, 0.35 if mode in {"research", "code"} else 0.45),
+        "gemini": lambda: gemini_chat(base_system, memory, GEMINI_TEXT_MODEL),
+        "deepseek": lambda: deepseek_chat(openai_messages, max_tokens, 0.35 if mode in {"research", "code"} else 0.45),
     }
-    return await run_with_fallback(provider_order(selected_model, "text"), calls, f"text:{selected_model}")
+    return await run_with_fallback(provider_order(selected_model, "text"), calls, f"{mode}:{selected_model}")
+
+
+async def research_router(selected_model: str, messages: list[dict]) -> str:
+    return await ai_router(selected_model, messages, mode="research", force_web=True)
+
+
+async def business_router(selected_model: str, messages: list[dict]) -> str:
+    return await ai_router(selected_model, messages, mode="business", force_web=False)
+
+
+async def code_router(selected_model: str, messages: list[dict]) -> str:
+    return await ai_router(selected_model, messages, mode="code", force_web=False)
+
+
+async def web_router(selected_model: str, messages: list[dict]) -> str:
+    return await ai_router(selected_model, messages, mode="web", force_web=True)
 
 
 async def openai_vision(system_text: str, question: str, image_bytes: bytes, history: list[dict]) -> str:
@@ -615,6 +842,7 @@ async def file_router(selected_model: str, question: str, filename: str, extract
     )
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
     return await ai_router(selected_model, messages)
+
 
 
 
