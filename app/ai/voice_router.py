@@ -114,4 +114,3 @@ def build_voice_user_message(transcript: str) -> str:
         f"{transcript}"
     )
 
-
