@@ -838,10 +838,9 @@ async def build_referral_leaderboard_text() -> str:
     )
 
 async def setup_bot_info():
+    # /start handler remains active, but /start must NOT be shown in Telegram's command menu.
+    # Telegram clients cache commands aggressively, so we clear and set several scopes/languages.
     commands = [
-        # /start handler remains active, but /start is intentionally not shown
-        # in Telegram's command menu. We clear old command scopes first because
-        # Telegram clients can cache old command lists for private chats.
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
@@ -854,24 +853,33 @@ async def setup_bot_info():
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ]
 
-    scopes = [
+    scopes_to_clear = [
         BotCommandScopeDefault(),
         BotCommandScopeAllPrivateChats(),
         BotCommandScopeAllGroupChats(),
         BotCommandScopeAllChatAdministrators(),
     ]
+    language_codes = [None, "ru", "en"]
 
-    for scope in scopes:
-        try:
-            await bot.delete_my_commands(scope=scope)
-        except Exception as e:
-            print(f"DELETE COMMANDS WARNING: {short_error_text(e)}")
+    for scope in scopes_to_clear:
+        for language_code in language_codes:
+            try:
+                kwargs = {"scope": scope}
+                if language_code:
+                    kwargs["language_code"] = language_code
+                await bot.delete_my_commands(**kwargs)
+            except Exception as e:
+                print(f"DELETE COMMANDS WARNING: {short_error_text(e)}")
 
     for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats()]:
-        try:
-            await bot.set_my_commands(commands, scope=scope)
-        except Exception as e:
-            print(f"SET COMMANDS WARNING: {short_error_text(e)}")
+        for language_code in language_codes:
+            try:
+                kwargs = {"scope": scope}
+                if language_code:
+                    kwargs["language_code"] = language_code
+                await bot.set_my_commands(commands, **kwargs)
+            except Exception as e:
+                print(f"SET COMMANDS WARNING: {short_error_text(e)}")
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -1742,7 +1750,7 @@ async def admin_health_command(message: Message):
         f"Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
         f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
         f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
-        f"Tavily live web: {'✅ ON' if TAVILY_API_KEY else '❌ OFF'}\n"
+        f"Live Web / Tavily key: {'✅ ON' if TAVILY_API_KEY else '❌ OFF'}\n"
         f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
     )
 
@@ -2540,7 +2548,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
