@@ -1786,6 +1786,11 @@ async def photo_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_vision", selected_model)
 
+        try:
+            await wait_message.edit_text("✨ Формирую ответ...")
+        except Exception:
+            pass
+
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
         else:
@@ -1894,6 +1899,11 @@ async def document_handler(message: Message):
         await save_message(message.from_user.id, "assistant", answer)
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_file", selected_model)
+
+        try:
+            await wait_message.edit_text("✨ Формирую ответ...")
+        except Exception:
+            pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2105,11 +2115,19 @@ async def chat_handler(message: Message):
                 )
             return
 
-    wait_message = await message.answer("Печатает ответ...")
+    await bot.send_chat_action(message.chat.id, "typing")
+    wait_message = await message.answer("🧠 VSotah AI думает...")
 
     try:
         await save_message(message.from_user.id, "user", message.text)
         history = await get_chat_history(message.from_user.id)
+
+        try:
+            await wait_message.edit_text("⚡ Анализирую запрос...")
+        except Exception:
+            pass
+
+        await bot.send_chat_action(message.chat.id, "typing")
         answer = await ai_router(selected_model, history)
 
         if not answer:
@@ -2118,6 +2136,11 @@ async def chat_handler(message: Message):
         await save_message(message.from_user.id, "assistant", answer)
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_message", selected_model)
+
+        try:
+            await wait_message.edit_text("✨ Формирую ответ...")
+        except Exception:
+            pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2197,6 +2220,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
