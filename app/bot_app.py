@@ -68,6 +68,7 @@ VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "false").lower() in {"1",
 ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
 
 PORT = int(os.getenv("PORT", "8080"))
+STARTED_AT = datetime.utcnow()
 
 ADMIN_IDS = {
     int(x.strip())
@@ -1489,6 +1490,21 @@ async def admin_handler(message: Message):
     )
 
 
+def percent(part: int | float | None, total: int | float | None) -> str:
+    if not total:
+        return "0%"
+    return f"{(float(part or 0) / float(total) * 100):.1f}%"
+
+
+def fmt_dt(value) -> str:
+    if not value:
+        return "—"
+    try:
+        return value.strftime("%d.%m %H:%M")
+    except Exception:
+        return str(value)
+
+
 @dp.message(Command("stats"))
 async def stats_handler(message: Message):
     if not is_admin(message.from_user.id):
@@ -1528,9 +1544,17 @@ async def stats_handler(message: Message):
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
         payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
         total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
+        payments_today = await conn.fetchval("SELECT COUNT(*) FROM payments WHERE created_at::date = CURRENT_DATE")
+        stars_today = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE created_at::date = CURRENT_DATE")
         referral_invites = await conn.fetchval("SELECT COUNT(*) FROM referrals")
+        referral_invites_today = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE created_at::date = CURRENT_DATE")
         referral_paid = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE status='paid'")
         referral_rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards")
+        errors_today = await conn.fetchval("""
+            SELECT COUNT(*) FROM events
+            WHERE created_at::date = CURRENT_DATE
+              AND (event_type ILIKE '%error%' OR event_type IN ('ai_provider_error','file_error','vision_error','image_error','voice_error'))
+        """)
 
         model_rows = await conn.fetch("""
             SELECT details AS model, COUNT(*) AS count
@@ -1587,7 +1611,14 @@ async def refstats_handler(message: Message):
         total_referrals = await conn.fetchval("SELECT COUNT(*) FROM referrals")
         paid_referrals = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE status='paid'")
         rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards")
+        bonus_requests_total = await conn.fetchval("SELECT COALESCE(SUM(bonus_requests), 0) FROM users")
         abuse_events = await conn.fetchval("SELECT COUNT(*) FROM referral_abuse_events")
+        recent_reward_rows = await conn.fetch("""
+            SELECT referrer_id, milestone, reward_title, source_count, created_at
+            FROM referral_rewards
+            ORDER BY created_at DESC
+            LIMIT 8
+        """)
         top_rows = await conn.fetch("""
             SELECT r.referrer_id,
                    COALESCE(u.username, u.first_name, r.referrer_id::text) AS name,
@@ -1615,13 +1646,111 @@ async def refstats_handler(message: Message):
             for index, row in enumerate(top_rows, start=1)
         )
 
+    recent_rewards_text = "Пока нет выданных бонусов."
+    if recent_reward_rows:
+        recent_rewards_text = "\n".join(
+            f"• ID {row['referrer_id']} — {row['reward_title'] or referral_reward_title(row['milestone'])} ({fmt_dt(row['created_at'])})"
+            for row in recent_reward_rows
+        )
+
     await message.answer(
         "💰 Referral stats\n\n"
         f"Всего приглашений: {total_referrals}\n"
         f"Оплат от приглашённых: {paid_referrals}\n"
+        f"Конверсия в оплату: {percent(paid_referrals, total_referrals)}\n"
         f"Выдано бонусов: {rewards_count}\n"
+        f"Бонусных запросов на балансах: {bonus_requests_total}\n"
         f"Anti-abuse событий: {abuse_events}\n\n"
-        f"🏆 Топ партнёров:\n{top_text}"
+        f"🏆 Топ партнёров:\n{top_text}\n\n"
+        f"🎁 Последние бонусы:\n{recent_rewards_text}"
+    )
+
+
+@dp.message(Command("health"))
+async def admin_health_command(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    started_delta = datetime.utcnow() - STARTED_AT
+    uptime_seconds = int(started_delta.total_seconds())
+    uptime_text = f"{uptime_seconds // 3600}ч {(uptime_seconds % 3600) // 60}м"
+
+    db_status = "❌ ERROR"
+    db_latency_ms = 0
+    try:
+        start = time.perf_counter()
+        async with db_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        db_latency_ms = round((time.perf_counter() - start) * 1000)
+        db_status = "✅ OK"
+    except Exception as e:
+        db_status = f"❌ {short_error_text(e)[:120]}"
+
+    bot_status = "❌ ERROR"
+    bot_username_text = "—"
+    try:
+        me = await get_bot_me_cached()
+        bot_username_text = f"@{me.username}" if me and me.username else "—"
+        bot_status = "✅ OK"
+    except Exception as e:
+        bot_status = f"❌ {short_error_text(e)[:120]}"
+
+    await message.answer(
+        "🩺 VSotahBot Health\n\n"
+        f"Bot API: {bot_status}\n"
+        f"Bot: {bot_username_text}\n"
+        f"PostgreSQL: {db_status}\n"
+        f"DB latency: {db_latency_ms} ms\n"
+        f"Uptime: {uptime_text}\n\n"
+        f"OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
+        f"Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
+        f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
+        f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
+        f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
+    )
+
+
+@dp.message(Command("errors"))
+async def admin_errors_command(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    async with db_pool.acquire() as conn:
+        error_rows = await conn.fetch("""
+            SELECT event_type, details, telegram_id, created_at
+            FROM events
+            WHERE event_type ILIKE '%error%'
+               OR event_type IN ('ai_provider_error','file_error','vision_error','image_error','voice_error')
+            ORDER BY created_at DESC
+            LIMIT 15
+        """)
+        limit_rows = await conn.fetch("""
+            SELECT details, COUNT(*) AS count
+            FROM events
+            WHERE event_type='limit_reached' AND created_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY details
+            ORDER BY count DESC
+            LIMIT 8
+        """)
+
+    errors_text = "Ошибок пока нет."
+    if error_rows:
+        errors_text = "\n".join(
+            f"• {fmt_dt(row['created_at'])} | {row['event_type']} | ID {row['telegram_id'] or '—'} | {(row['details'] or '')[:140]}"
+            for row in error_rows
+        )
+
+    limits_text = "Лимиты за 24 часа не упирались."
+    if limit_rows:
+        limits_text = "\n".join(
+            f"• {row['details'] or 'unknown'}: {row['count']}"
+            for row in limit_rows
+        )
+
+    await message.answer(
+        "⚠️ VSotah Errors / Limits\n\n"
+        f"Последние ошибки:\n{errors_text}\n\n"
+        f"Лимиты за 24 часа:\n{limits_text}"
     )
 
 
@@ -1802,6 +1931,7 @@ async def photo_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"VISION ERROR SHORT:\n{admin_error}")
         print(f"VISION ERROR TRACE:\n{traceback.format_exc()}")
+        await log_event(message.from_user.id, "vision_error", admin_error)
 
         try:
             await wait_message.edit_text(
@@ -1916,6 +2046,7 @@ async def document_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"FILE ERROR SHORT:\n{admin_error}")
         print(f"FILE ERROR TRACE:\n{traceback.format_exc()}")
+        await log_event(message.from_user.id, "file_error", admin_error)
 
         try:
             await wait_message.edit_text(
@@ -2016,6 +2147,7 @@ async def voice_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"VOICE ERROR SHORT:\n{admin_error}")
         print(f"VOICE ERROR TRACE:\n{traceback.format_exc()}")
+        await log_event(message.from_user.id, "voice_error", admin_error)
         await send_ai_error_to_admin(f"⚠️ VOICE AI ERROR | {selected_model} | {admin_error}")
 
         try:
@@ -2103,6 +2235,7 @@ async def chat_handler(message: Message):
             admin_error = short_error_text(e)
             print(f"IMAGE ERROR SHORT:\n{admin_error}")
             print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
+            await log_event(message.from_user.id, "image_error", admin_error)
             try:
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
@@ -2154,6 +2287,7 @@ async def chat_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"AI ERROR SHORT:\n{admin_error}")
         print(f"AI ERROR TRACE:\n{traceback.format_exc()}")
+        await log_event(message.from_user.id, "ai_provider_error", admin_error)
 
         await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
 
@@ -2221,6 +2355,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
