@@ -2062,6 +2062,37 @@ async def document_handler(message: Message):
             )
 
 
+async def send_fast_voice_reply(message: Message, answer: str):
+    """Generate a short voice reply in background so text answer stays instant."""
+    status_message = None
+    try:
+        status_message = await message.answer("🔊 Голосовой ответ готовится в фоне...")
+        audio_reply = await text_to_speech(answer)
+        if not audio_reply:
+            if status_message:
+                await status_message.edit_text("⚠️ Не удалось подготовить голосовой ответ.")
+            return
+
+        filename = "vsotah_voice_reply.ogg"
+        audio = BufferedInputFile(audio_reply, filename=filename)
+        await message.answer_voice(voice=audio, caption="🔊 Короткий голосовой ответ VSotah AI")
+
+        if status_message:
+            try:
+                await status_message.delete()
+            except Exception:
+                await status_message.edit_text("✅ Голосовой ответ отправлен.")
+
+    except Exception as voice_reply_error:
+        await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
+        print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
+        if status_message:
+            try:
+                await status_message.edit_text("⚠️ Голосовой ответ не получился, но текстовый ответ выше уже готов.")
+            except Exception:
+                pass
+
+
 @dp.message(F.voice)
 async def voice_handler(message: Message):
     """Voice AI 2.0: free voice assistant for all users.
@@ -2127,15 +2158,9 @@ async def voice_handler(message: Message):
                 await message.answer(response_text[i:i + 3900])
 
         if VOICE_REPLY_ENABLED:
-            try:
-                await message.answer("🔊 Готовлю голосовой ответ...")
-                audio_reply = await text_to_speech(answer)
-                if audio_reply:
-                    audio = BufferedInputFile(audio_reply, filename="vsotah_voice_reply.mp3")
-                    await message.answer_voice(voice=audio, caption="🔊 Голосовой ответ VSotah AI")
-            except Exception as voice_reply_error:
-                await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
-                print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
+            # Do not block the voice handler while TTS is being generated.
+            # The user already has the full text answer; the short audio answer arrives separately.
+            asyncio.create_task(send_fast_voice_reply(message, answer))
 
     except ValueError as e:
         error_code = str(e)
@@ -2356,7 +2381,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
