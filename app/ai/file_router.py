@@ -198,17 +198,20 @@ def build_file_analysis_prompt(question: str, filename: str, extracted_text: str
     question = question.strip() or "Проанализируй файл и выдели главное."
 
     return (
-        "Ты — файловый аналитик VSotah AI. Ответь на русском, структурно и по делу.\n\n"
+        "Ты — premium файловый аналитик VSotah AI. "
+        "Отвечай дорого, профессионально, понятно и структурированно.\n\n"
         f"Тип файла: {file_kind}\n"
         f"Имя файла: {filename}\n"
         f"Вопрос пользователя: {question}\n\n"
-        "Правила:\n"
+        "Правила ответа:\n"
         "1. Не выдумывай данные, которых нет в файле.\n"
-        "2. Если пользователь просит кратко — отвечай кратко.\n"
-        "3. Если это таблица — выдели ключевые цифры, строки, аномалии и выводы.\n"
-        "4. Если это договор/документ — выдели смысл, риски, обязательства и важные даты.\n"
-        "5. Если это учебный файл — объясни понятно и помоги с выводами.\n"
-        "6. В конце добавь короткий блок: «Что можно сделать дальше».\n\n"
+        "2. Сначала дай краткое summary.\n"
+        "3. Затем выдели главные выводы списком.\n"
+        "4. Для таблиц ищи закономерности, аномалии, рост, падение и важные цифры.\n"
+        "5. Для договоров выделяй риски, сроки, обязательства и потенциально опасные пункты.\n"
+        "6. Для учебных материалов объясняй простым языком.\n"
+        "7. Используй аккуратные markdown-блоки и списки.\n"
+        "8. В конце всегда добавляй блок «Что можно сделать дальше».\n\n"
         "Содержимое файла:\n"
         f"{_limit_text(extracted_text)}"
     )
@@ -216,12 +219,26 @@ def build_file_analysis_prompt(question: str, filename: str, extracted_text: str
 
 def build_file_status_text(filename: str, stage: str) -> str:
     ext = _extension(filename).upper() or "FILE"
+
     if stage == "reading":
-        return f"📎 Читаю {ext}: {filename}..."
+        return (
+            "📄 Обрабатываю файл...\n"
+            f"⚡ Читаю {ext}: {filename}"
+        )
+
     if stage == "analyzing":
-        return f"🧠 Анализирую {ext}: {filename}..."
+        return (
+            "🧠 VSotah AI анализирует файл...\n"
+            "📊 Извлекаю ключевые данные...\n"
+            "✨ Формирую AI-выводы..."
+        )
+
     if stage == "scanned_pdf":
-        return "📄 PDF похож на скан. Анализирую страницы как изображения..."
+        return (
+            "📄 PDF похож на скан.\n"
+            "🖼 Анализирую страницы как изображения..."
+        )
+
     return "📎 Обрабатываю файл..."
 
 
@@ -309,4 +326,6 @@ async def file_router(
     prompt = build_file_analysis_prompt(question, filename, extracted_text)
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": prompt}]
     return await ai_router(selected_model, messages)
+
+
 
