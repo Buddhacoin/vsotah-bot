@@ -48,6 +48,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini")
@@ -834,7 +835,9 @@ async def build_referral_leaderboard_text() -> str:
 
 async def setup_bot_info():
     await bot.set_my_commands([
-        BotCommand(command="start", description="👋 Что умеет бот"),
+        # /start handler remains active, but the command is intentionally hidden
+        # from the persistent Telegram command menu so it does not pop up again
+        # after users open the bot menu.
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
@@ -1716,6 +1719,7 @@ async def admin_health_command(message: Message):
         f"Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
         f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
         f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
+        f"Tavily live web: {'✅ ON' if TAVILY_API_KEY else '❌ OFF'}\n"
         f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
     )
 
@@ -2514,7 +2518,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
