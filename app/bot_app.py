@@ -1226,6 +1226,15 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     await clear_start_for_chat(message.chat.id)
+
+    # В приватном чате удаляем пользовательскую команду /start, чтобы она не висела
+    # под приветствием. Если Telegram не даст удалить — просто игнорируем.
+    if message.chat.type == "private":
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
     now = time.time()
     last = recent_starts.get(message.from_user.id, 0)
     if now - last < 2:
@@ -2123,7 +2132,7 @@ async def photo_handler(message: Message):
         await log_event(message.from_user.id, "ai_vision", selected_model)
 
         try:
-            await wait_message.edit_text("✨ Формирую ответ...")
+            await wait_message.edit_text("✅ Готово")
         except Exception:
             pass
 
@@ -2238,7 +2247,7 @@ async def document_handler(message: Message):
         await log_event(message.from_user.id, "ai_file", selected_model)
 
         try:
-            await wait_message.edit_text("✨ Формирую ответ...")
+            await wait_message.edit_text("✅ Готово")
         except Exception:
             pass
 
@@ -2341,7 +2350,7 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
         history = await get_chat_history(message.from_user.id)
 
-        await wait_message.edit_text("🧠 Думаю над ответом...")
+        await wait_message.edit_text("✍️ Печатает ответ...")
         answer = await ai_router(selected_model, history)
 
         if not answer:
@@ -2350,10 +2359,9 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "assistant", answer)
         await log_event(message.from_user.id, "ai_voice_free", selected_model)
 
-        response_text = (
-            f"📝 Распознал:\n{transcript}\n\n"
-            f"💬 Ответ:\n{answer}"
-        )
+        # Пользователю не нужен технический блок "Распознал / Ответ".
+        # Показываем сразу готовый ответ, как в обычном чате.
+        response_text = answer
         if len(response_text) <= 3900:
             await wait_message.edit_text(response_text)
         else:
@@ -2481,14 +2489,14 @@ async def chat_handler(message: Message):
     # Не отправляем Telegram chat_action typing для обычного текста:
     # на некоторых клиентах он может висеть сверху несколько секунд уже после ответа.
     # Вместо этого используем собственное loading-сообщение, которое точно заменяется итоговым ответом.
-    wait_message = await message.answer("🧠 VSotah AI думает...")
+    wait_message = await message.answer("✍️ Печатает ответ...")
 
     try:
         await save_message(message.from_user.id, "user", message.text)
         history = await get_chat_history(message.from_user.id)
 
         try:
-            await wait_message.edit_text("⚡ Анализирую запрос...")
+            await wait_message.edit_text("✍️ Печатает ответ...")
         except Exception:
             pass
 
@@ -2502,7 +2510,7 @@ async def chat_handler(message: Message):
         await log_event(message.from_user.id, "ai_message", selected_model)
 
         try:
-            await wait_message.edit_text("✨ Формирую ответ...")
+            await wait_message.edit_text("✅ Готово")
         except Exception:
             pass
 
