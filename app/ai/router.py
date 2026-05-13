@@ -161,6 +161,109 @@ def web_is_configured() -> bool:
     return bool(TAVILY_API_KEY or SERPER_API_KEY or BRAVE_SEARCH_API_KEY)
 
 
+def detect_weather_city(text: str) -> str:
+    """Best-effort city detector for common Russian weather questions."""
+    t = (text or "").lower().strip()
+    if not any(word in t for word in ["погода", "температур", "weather"]):
+        return ""
+
+    city_patterns = [
+        r"(?:в городе|в г\.?|в)\s+([а-яёa-z\- ]{2,40})",
+        r"(?:для города|по городу)\s+([а-яёa-z\- ]{2,40})",
+    ]
+    city = ""
+    for pattern in city_patterns:
+        match = re.search(pattern, t, flags=re.I)
+        if match:
+            city = match.group(1).strip()
+            break
+
+    if not city:
+        return ""
+
+    city = re.sub(r"\b(какая|какой|сегодня|сейчас|завтра|россии|области|область|погода|температура)\b", " ", city)
+    city = re.sub(r"[^а-яёa-z\- ]+", " ", city).strip()
+    city = re.sub(r"\s+", " ", city)
+    if not city:
+        return ""
+
+    # Normalize frequent Russian case forms for reliable external weather lookup.
+    if "моск" in city:
+        return "Moscow,Russia"
+    if "киров" in city:
+        return "Kirov,Russia"
+    if "санкт" in city or "петербург" in city or "питер" in city:
+        return "Saint Petersburg,Russia"
+    if "казан" in city:
+        return "Kazan,Russia"
+    if "екатеринбург" in city:
+        return "Yekaterinburg,Russia"
+    if "новосибир" in city:
+        return "Novosibirsk,Russia"
+
+    return city
+
+
+def _weather_description_ru(item: dict) -> str:
+    values = item.get("lang_ru") or item.get("weatherDesc") or []
+    if values and isinstance(values, list):
+        return str(values[0].get("value") or "").strip()
+    return ""
+
+
+async def fetch_weather_answer(query: str) -> str:
+    """Direct current weather answer via public wttr.in JSON.
+
+    This avoids vague LLM answers for simple weather questions.
+    Tavily remains the general live-web provider for news/research.
+    """
+    city = detect_weather_city(query)
+    if not city:
+        return ""
+    try:
+        data = await _get_json(
+            f"https://wttr.in/{city}",
+            {"Accept": "application/json", "User-Agent": "VSotahBot/1.0"},
+            {"format": "j1", "lang": "ru"},
+        )
+        current = (data.get("current_condition") or [{}])[0]
+        nearest = (data.get("nearest_area") or [{}])[0]
+        area = ""
+        if nearest:
+            area_values = nearest.get("areaName") or []
+            country_values = nearest.get("country") or []
+            area = (area_values[0].get("value") if area_values else "") or ""
+            country = (country_values[0].get("value") if country_values else "") or ""
+            if country and country not in area:
+                area = f"{area}, {country}" if area else country
+        temp = current.get("temp_C")
+        feels = current.get("FeelsLikeC")
+        humidity = current.get("humidity")
+        wind = current.get("windspeedKmph")
+        desc = _weather_description_ru(current)
+        parts = []
+        if desc:
+            parts.append(desc.lower())
+        if temp not in {None, ""}:
+            parts.append(f"температура {temp}°C")
+        if feels not in {None, ""}:
+            parts.append(f"ощущается как {feels}°C")
+        if wind not in {None, ""}:
+            parts.append(f"ветер {wind} км/ч")
+        if humidity not in {None, ""}:
+            parts.append(f"влажность {humidity}%")
+        if not parts:
+            return ""
+        place = area or city
+        return (
+            f"Сейчас погода: {place}. " + "; ".join(parts) + ".\n\n"
+            "Данные актуальны на момент запроса, но погода может быстро меняться."
+        )
+    except Exception as e:
+        print(f"WEATHER ERROR: {short_error_text(e)}")
+        return ""
+
+
 def detect_crypto_symbols(text: str) -> list[tuple[str, str]]:
     """Detect common crypto price questions and return CoinGecko ids with display names."""
     t = (text or "").lower()
@@ -380,10 +483,10 @@ async def search_web(query: str) -> list[dict]:
         if TAVILY_API_KEY:
             payload = {
                 "query": query,
-                "search_depth": "fast",
+                "search_depth": "basic",
                 "topic": infer_tavily_topic(query),
                 "max_results": WEB_SEARCH_MAX_RESULTS,
-                "include_answer": "basic",
+                "include_answer": True,
                 "include_raw_content": False,
                 "include_images": False,
                 "include_favicon": False,
@@ -485,6 +588,75 @@ def render_web_context(results: list[dict]) -> str:
         snippet = (item.get("snippet") or "").strip()
         lines.append(f"[{idx}] {title}\nURL: {url}\nSnippet: {snippet}")
     return "\n\n".join(lines)[:7500]
+
+
+def render_sources(results: list[dict], max_sources: int = 3) -> str:
+    sources = [item for item in results if item.get("kind") != "answer" and item.get("url")]
+    if not sources:
+        return ""
+    lines = ["Источники:"]
+    for item in sources[:max_sources]:
+        title = (item.get("title") or "Источник").strip()
+        url = (item.get("url") or "").strip()
+        lines.append(f"• {title}: {url}")
+    return "\n".join(lines)
+
+
+def build_direct_web_answer(query: str, results: list[dict]) -> str:
+    """Return a user-ready live answer when Tavily already provided one.
+
+    This is intentionally before the LLM call so the bot cannot fall back to
+    stale model knowledge and say it has no internet access.
+    """
+    if not results:
+        return ""
+    answer = ""
+    for item in results:
+        if item.get("kind") == "answer" and item.get("snippet"):
+            answer = str(item.get("snippet", "")).strip()
+            break
+    if not answer:
+        snippets = []
+        for item in results[:3]:
+            snippet = str(item.get("snippet") or "").strip()
+            title = str(item.get("title") or "Источник").strip()
+            if snippet:
+                snippets.append(f"{title}: {snippet}")
+        if snippets:
+            answer = "\n".join(snippets)
+    if not answer:
+        return ""
+
+    answer = clean_ai_answer(answer)
+    # Keep direct web answers compact in Telegram.
+    if len(answer) > 1800:
+        answer = answer[:1800].rstrip() + "…"
+    sources = render_sources(results)
+    if sources:
+        return f"{answer}\n\n{sources}"
+    return answer
+
+
+async def direct_live_answer(query: str, force_web: bool = False) -> str:
+    query = normalize_search_query(query)
+    if not query:
+        return ""
+
+    weather_answer = await fetch_weather_answer(query)
+    if weather_answer:
+        return weather_answer
+
+    crypto_answer = await fetch_crypto_price_answer(query)
+    if crypto_answer:
+        return crypto_answer
+
+    if not (force_web or wants_live_web(query)):
+        return ""
+    if not web_is_configured():
+        return ""
+
+    results = await search_web(query)
+    return build_direct_web_answer(query, results)
 
 
 def mode_instruction(mode: str) -> str:
@@ -673,11 +845,14 @@ async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str
 async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat", force_web: bool = False) -> str:
     mode = (mode or "chat").lower()
 
-    # Fast direct market-data answer for simple crypto price questions.
-    # This avoids vague LLM responses like “I do not have access”.
-    direct_crypto_answer = await fetch_crypto_price_answer(latest_user_text(messages))
-    if direct_crypto_answer:
-        return direct_crypto_answer
+    # Fast direct live answer for weather/crypto/current web questions.
+    # This prevents stale LLM replies like “I do not have access”.
+    direct_answer = await direct_live_answer(
+        latest_user_text(messages),
+        force_web=force_web or mode in {"web", "research"},
+    )
+    if direct_answer:
+        return direct_answer
 
     messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=force_web or mode in {"web", "research"})
 
