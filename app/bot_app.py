@@ -18,6 +18,10 @@ from aiogram.types import (
     PreCheckoutQuery,
     LabeledPrice,
     BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllChatAdministrators,
     LinkPreviewOptions,
     BufferedInputFile,
 )
@@ -834,10 +838,10 @@ async def build_referral_leaderboard_text() -> str:
     )
 
 async def setup_bot_info():
-    await bot.set_my_commands([
-        # /start handler remains active, but the command is intentionally hidden
-        # from the persistent Telegram command menu so it does not pop up again
-        # after users open the bot menu.
+    commands = [
+        # /start handler remains active, but /start is intentionally not shown
+        # in Telegram's command menu. We clear old command scopes first because
+        # Telegram clients can cache old command lists for private chats.
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
@@ -848,7 +852,26 @@ async def setup_bot_info():
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
-    ])
+    ]
+
+    scopes = [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+    ]
+
+    for scope in scopes:
+        try:
+            await bot.delete_my_commands(scope=scope)
+        except Exception as e:
+            print(f"DELETE COMMANDS WARNING: {short_error_text(e)}")
+
+    for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats()]:
+        try:
+            await bot.set_my_commands(commands, scope=scope)
+        except Exception as e:
+            print(f"SET COMMANDS WARNING: {short_error_text(e)}")
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -2212,7 +2235,7 @@ async def send_fast_voice_reply(message: Message, answer: str):
 
         filename = "vsotah_voice_reply.ogg"
         audio = BufferedInputFile(audio_reply, filename=filename)
-        await message.answer_voice(voice=audio, caption="🔊 Короткий голосовой ответ VSotah AI")
+        await message.answer_voice(voice=audio, caption="🔊 Голосовой ответ")
 
         if status_message:
             try:
@@ -2283,7 +2306,6 @@ async def voice_handler(message: Message):
         await log_event(message.from_user.id, "ai_voice_free", selected_model)
 
         response_text = (
-            "🎙 Voice AI 2.0\n\n"
             f"📝 Распознал:\n{transcript}\n\n"
             f"💬 Ответ:\n{answer}"
         )
