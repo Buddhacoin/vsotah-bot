@@ -169,7 +169,7 @@ def build_search_query(text: str) -> str:
         "погода", "кто сейчас", "на данный момент", "latest", "today", "current", "now",
     ]
     if any(word in query.lower() for word in freshness_words):
-        query = f"{query} актуальные данные 2026"
+        query = f"{query} актуальные данные {datetime.now(timezone.utc).year}"
 
     return query[:450]
 
@@ -259,6 +259,7 @@ def detect_weather_city(text: str) -> str:
     return city
 
 
+
 def _weather_description_ru(item: dict) -> str:
     values = item.get("lang_ru") or item.get("weatherDesc") or []
     if values and isinstance(values, list):
@@ -266,15 +267,135 @@ def _weather_description_ru(item: dict) -> str:
     return ""
 
 
-async def fetch_weather_answer(query: str) -> str:
-    """Direct current weather answer via public wttr.in JSON.
+OPEN_METEO_WEATHER_RU = {
+    0: "ясно",
+    1: "преимущественно ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "изморозь/туман",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "слабый ливень",
+    81: "ливень",
+    82: "сильный ливень",
+    95: "гроза",
+    96: "гроза с градом",
+    99: "сильная гроза с градом",
+}
 
-    This avoids vague LLM answers for simple weather questions.
-    Tavily remains the general live-web provider for news/research.
+
+def _weather_code_ru(code: Any) -> str:
+    try:
+        return OPEN_METEO_WEATHER_RU.get(int(code), "погодные условия уточняются")
+    except Exception:
+        return "погодные условия уточняются"
+
+
+async def _open_meteo_weather(city: str) -> str:
+    """Universal current weather via Open-Meteo, no API key required.
+
+    This is intentionally used instead of generic web search for weather:
+    search results often return unrelated pages/snippets, while weather requires
+    a structured live-data endpoint.
     """
+    geo = await _get_json(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        {"Accept": "application/json", "User-Agent": "VSotahBot/1.0"},
+        {"name": city, "count": 3, "language": "ru", "format": "json"},
+    )
+    results = geo.get("results") or []
+    if not results:
+        return ""
+
+    # Prefer Russian locations when the city name is ambiguous.
+    place = None
+    for item in results:
+        country_code = (item.get("country_code") or "").upper()
+        if country_code == "RU":
+            place = item
+            break
+    if place is None:
+        place = results[0]
+
+    lat = place.get("latitude")
+    lon = place.get("longitude")
+    if lat is None or lon is None:
+        return ""
+
+    data = await _get_json(
+        "https://api.open-meteo.com/v1/forecast",
+        {"Accept": "application/json", "User-Agent": "VSotahBot/1.0"},
+        {
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "timezone": "auto",
+            "forecast_days": 1,
+        },
+    )
+    current = data.get("current") or {}
+    daily = data.get("daily") or {}
+    if not current:
+        return ""
+
+    name = place.get("name") or city
+    admin = place.get("admin1") or ""
+    country = place.get("country") or ""
+    location = ", ".join(x for x in [name, admin, country] if x)
+
+    temp = current.get("temperature_2m")
+    feels = current.get("apparent_temperature")
+    humidity = current.get("relative_humidity_2m")
+    wind = current.get("wind_speed_10m")
+    desc = _weather_code_ru(current.get("weather_code"))
+
+    max_list = daily.get("temperature_2m_max") or []
+    min_list = daily.get("temperature_2m_min") or []
+    rain_list = daily.get("precipitation_probability_max") or []
+    day_extra = []
+    if max_list and min_list:
+        day_extra.append(f"днём примерно до {round(float(max_list[0]))}°C, минимум около {round(float(min_list[0]))}°C")
+    if rain_list and rain_list[0] is not None:
+        day_extra.append(f"вероятность осадков до {round(float(rain_list[0]))}%")
+
+    lines = [f"Сейчас в {location}: {desc}."]
+    if temp is not None:
+        lines.append(f"Температура {round(float(temp))}°C")
+    if feels is not None:
+        lines.append(f"ощущается как {round(float(feels))}°C")
+    if wind is not None:
+        lines.append(f"ветер {round(float(wind))} км/ч")
+    if humidity is not None:
+        lines.append(f"влажность {round(float(humidity))}%")
+
+    answer = "; ".join(lines) + "."
+    if day_extra:
+        answer += "\nНа сегодня: " + "; ".join(day_extra) + "."
+    return answer + "\n\nДанные ориентировочные и могут быстро меняться."
+
+
+async def fetch_weather_answer(query: str) -> str:
     city = detect_weather_city(query)
     if not city:
         return ""
+
+    try:
+        answer = await _open_meteo_weather(city)
+        if answer:
+            return answer
+    except Exception as e:
+        print(f"OPEN METEO WEATHER ERROR: {short_error_text(e)}")
+
+    # Fallback to wttr.in if Open-Meteo is temporarily unavailable.
     try:
         data = await _get_json(
             f"https://wttr.in/{city}",
@@ -282,15 +403,6 @@ async def fetch_weather_answer(query: str) -> str:
             {"format": "j1", "lang": "ru"},
         )
         current = (data.get("current_condition") or [{}])[0]
-        nearest = (data.get("nearest_area") or [{}])[0]
-        area = ""
-        if nearest:
-            area_values = nearest.get("areaName") or []
-            country_values = nearest.get("country") or []
-            area = (area_values[0].get("value") if area_values else "") or ""
-            country = (country_values[0].get("value") if country_values else "") or ""
-            if country and country not in area:
-                area = f"{area}, {country}" if area else country
         temp = current.get("temp_C")
         feels = current.get("FeelsLikeC")
         humidity = current.get("humidity")
@@ -307,16 +419,11 @@ async def fetch_weather_answer(query: str) -> str:
             parts.append(f"ветер {wind} км/ч")
         if humidity not in {None, ""}:
             parts.append(f"влажность {humidity}%")
-        if not parts:
-            return ""
-        place = area or city
-        return (
-            f"Сейчас погода: {place}. " + "; ".join(parts) + ".\n\n"
-            "Данные актуальны на момент запроса, но погода может быстро меняться."
-        )
+        if parts:
+            return f"Сейчас погода: {city}. " + "; ".join(parts) + "."
     except Exception as e:
-        print(f"WEATHER ERROR: {short_error_text(e)}")
-        return ""
+        print(f"WTTR WEATHER ERROR: {short_error_text(e)}")
+    return ""
 
 
 def detect_crypto_symbols(text: str) -> list[tuple[str, str]]:
