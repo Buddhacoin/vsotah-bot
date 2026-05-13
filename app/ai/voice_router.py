@@ -7,6 +7,7 @@ from openai import AsyncOpenAI
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "whisper-1")
+OPENAI_STT_LANGUAGE = os.getenv("OPENAI_STT_LANGUAGE", "").strip()
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 VOICE_TRANSCRIPT_LIMIT = int(os.getenv("VOICE_TRANSCRIPT_LIMIT", "5000"))
@@ -40,11 +41,16 @@ async def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> s
     audio_file = BytesIO(audio_bytes)
     audio_file.name = filename
 
-    response = await openai_client.audio.transcriptions.create(
-        model=OPENAI_STT_MODEL,
-        file=audio_file,
-        language="ru",
-    )
+    kwargs = {
+        "model": OPENAI_STT_MODEL,
+        "file": audio_file,
+    }
+    # Empty language means automatic language detection. Set OPENAI_STT_LANGUAGE=ru
+    # in Railway if you want to force Russian-only recognition.
+    if OPENAI_STT_LANGUAGE:
+        kwargs["language"] = OPENAI_STT_LANGUAGE
+
+    response = await openai_client.audio.transcriptions.create(**kwargs)
 
     text = _safe_text(getattr(response, "text", ""))
     return _clip_text(text, VOICE_TRANSCRIPT_LIMIT)
@@ -86,4 +92,5 @@ def build_voice_user_message(transcript: str) -> str:
         "Распознанный текст:\n\n"
         f"{transcript}"
     )
+
 
