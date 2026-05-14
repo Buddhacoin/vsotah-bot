@@ -48,6 +48,7 @@ from app.ai.file_router import (
     build_file_status_text,
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
+from app.ai.memory import build_dialogue_memory_note
 from app.referrals import build_referral_link, parse_referral_code, build_invite_text, build_telegram_share_url
 from app.performance import (
     init_performance_layer,
@@ -79,7 +80,7 @@ GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
 
 # Speed settings. You can override these in Railway Variables if needed.
-TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "6"))
+TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "14"))
 VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
 TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
@@ -1078,14 +1079,18 @@ async def save_message(telegram_id, role, content):
             content[:12000],
         )
     await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
+    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}:memory2")
 
 
 async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
-    cache_key = f"history:{telegram_id}:{limit}"
+    cache_key = f"history:{telegram_id}:{limit}:memory2"
     cached_history = await cache_get(cache_key)
     if cached_history is not None:
         return cached_history
 
+    # AI Memory 2.0: fetch a wider recent window, build a compact deterministic
+    # memory note, then keep only the freshest turns for the actual dialogue.
+    fetch_limit = max(limit, 24)
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
@@ -1093,21 +1098,28 @@ async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
             WHERE telegram_id=$1
             ORDER BY created_at DESC
             LIMIT $2
-        """, telegram_id, limit)
+        """, telegram_id, fetch_limit)
 
-    history = []
+    full_history = []
     for row in reversed(rows):
         if row["role"] in {"user", "assistant", "system"}:
-            history.append({"role": row["role"], "content": row["content"]})
+            full_history.append({"role": row["role"], "content": row["content"]})
+
+    recent_history = full_history[-limit:]
+    memory_note = build_dialogue_memory_note(full_history)
+    history = []
+    if memory_note:
+        history.append({"role": "system", "content": memory_note})
+    history.extend(recent_history)
 
     await cache_set(cache_key, history, ttl_seconds=20)
     return history
-
 
 async def clear_chat(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE telegram_id=$1", telegram_id)
     await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
+    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}:memory2")
     await log_event(telegram_id, "delete_context")
 
 
@@ -1216,6 +1228,20 @@ async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
 
 def short_error_text(error: Exception) -> str:
     return str(error).replace("\n", " ")[:1200]
+
+
+_BOT_ME_CACHE = {"value": None, "expires_at": 0.0}
+
+
+async def get_bot_me_cached(ttl_seconds: int = 300):
+    now = time.time()
+    cached = _BOT_ME_CACHE.get("value")
+    if cached is not None and now < float(_BOT_ME_CACHE.get("expires_at") or 0):
+        return cached
+    me = await bot.get_me()
+    _BOT_ME_CACHE["value"] = me
+    _BOT_ME_CACHE["expires_at"] = now + ttl_seconds
+    return me
 
 
 async def send_ai_error_to_admin(error_text: str):
