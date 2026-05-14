@@ -38,6 +38,7 @@ from app.ai.router import (
     search_web,
     vision_router,
     generate_nano_banana_image,
+    edit_nano_banana_image,
     generate_gpt_image,
     edit_gpt_image,
 )
@@ -69,14 +70,14 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini")
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.1-chat-latest")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.1-chat-latest")
 ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
-NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
-GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.1-flash")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.1-flash")
+NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "gemini-3-pro-image-preview")
+GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-2")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
 
 # Speed settings. You can override these in Railway Variables if needed.
@@ -210,7 +211,7 @@ def models_menu():
             [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash", callback_data="set_model_gemini")],
             [InlineKeyboardButton(text="✴️ Claude — Sonnet", callback_data="set_model_claude")],
             [InlineKeyboardButton(text="🍌 Nano Banana Pro", callback_data="set_model_nanobanana")],
-            [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
+            [InlineKeyboardButton(text="🌀 GPT Image", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -333,7 +334,7 @@ def model_display_name(model: str) -> str:
         "gemini": "✦ Gemini — 2.5 Flash",
         "claude": "✴️ Claude — Sonnet",
         "nanobanana": "🍌 Nano Banana Pro",
-        "gptimage": "🌀 Sora GPT Image",
+        "gptimage": "🌀 GPT Image",
     }
     return names.get(model, "🌀 ChatGPT — GPT-4o mini")
 
@@ -358,7 +359,7 @@ def welcome_text():
 
 🌇 Генерация изображений:
 • Nano Banana Pro
-• Sora GPT Image
+• GPT Image
 
 📷 Анализ фото:
 • вопросы по изображениям
@@ -380,7 +381,7 @@ def premium_text():
 • Gemini — 2.5 Flash
 • Claude — Sonnet
 • Nano Banana Pro
-• Sora GPT Image
+• GPT Image
 
 • 15 запросов в день
 • из них 5 Image
@@ -1140,7 +1141,7 @@ async def user_profile_text(user):
         "claude": "Claude",
         "gemini": "Gemini",
         "nanobanana": "Nano Banana",
-        "gptimage": "Sora GPT Image",
+        "gptimage": "GPT Image",
         "deepseek": "DeepSeek",
     }
 
@@ -1184,7 +1185,7 @@ async def user_profile_text(user):
         "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
         "⭐ PLUS — Claude Sonnet и 500 запросов в неделю\n"
         "💎 PRO — Nano Banana Pro и 1400 запросов в неделю\n"
-        "👑 VIP — Sora GPT Image и безлимит"
+        "👑 VIP — GPT Image и безлимит"
     )
     return text
 
@@ -2223,7 +2224,7 @@ async def photo_handler(message: Message):
             "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
         )
 
-    is_image_edit = selected_model == "gptimage"
+    is_image_edit = selected_model in {"nanobanana", "gptimage"}
     if is_image_edit and not await check_free_image_limit(user):
         await log_event(message.from_user.id, "limit_reached", "FREE_IMAGE_DAY_LIMIT")
         await message.answer(
@@ -2236,12 +2237,15 @@ async def photo_handler(message: Message):
     wait_message = await message.answer("🖼 Редактирую изображение..." if is_image_edit else "📷 Анализирую фото...")
 
     try:
-        question = message.caption or ("Улучши это изображение и сохрани смысл." if is_image_edit else "Что изображено на фото?")
+        question = message.caption or ("Улучши это изображение, сохрани человека, лицо, позу и естественный вид." if is_image_edit else "Что изображено на фото?")
         image_bytes = await download_telegram_photo(message)
 
         if is_image_edit:
             await save_message(message.from_user.id, "user", f"[Редактирование изображения] {question}")
-            edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
+            if selected_model == "nanobanana":
+                edited_bytes, text_note = await edit_nano_banana_image(question, image_bytes)
+            else:
+                edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
 
             if not edited_bytes:
                 print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
@@ -2251,10 +2255,10 @@ async def photo_handler(message: Message):
                 )
                 return
 
-            photo = BufferedInputFile(edited_bytes, filename="edited_gpt_image.png")
+            photo = BufferedInputFile(edited_bytes, filename="edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png")
             await wait_message.delete()
             await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "✅ Готово"))
-            await save_message(message.from_user.id, "assistant", "[gptimage image edited]")
+            await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
             await increase_image_usage(message.from_user.id)
             await log_event(message.from_user.id, "ai_image_edit", selected_model)
@@ -2626,7 +2630,7 @@ async def chat_handler(message: Message):
                 )
                 return
 
-            filename = "nano_banana.png" if selected_model == "nanobanana" else "sora_gpt_image.png"
+            filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
             photo = BufferedInputFile(image_bytes, filename=filename)
             await wait_message.delete()
             await message.answer_photo(
