@@ -234,11 +234,9 @@ def build_image_edit_prompt(user_prompt: str | None) -> str:
 
 
 def image_result_caption(model_key: str, action: str = "generate") -> str:
-    if action == "edit":
-        return "🖼 Готово"
-    if model_key == "nanobanana":
-        return "🍌 Готово"
-    return "🌀 Готово"
+    # Чистый caption без лишних иконок: в Telegram маленькие preview-иконки
+    # рядом с подписью выглядят как визуальный мусор.
+    return "Готово"
 
 
 def image_filename(model_key: str, action: str = "generate") -> str:
