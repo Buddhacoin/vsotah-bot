@@ -895,15 +895,11 @@ async def clear_start_for_chat(chat_id: int):
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ]
-    for language_code in [None, "ru", "en"]:
-        try:
-            kwargs = {"scope": BotCommandScopeChat(chat_id=chat_id)}
-            if language_code:
-                kwargs["language_code"] = language_code
-            await bot.delete_my_commands(**kwargs)
-            await bot.set_my_commands(commands, **kwargs)
-        except Exception as e:
-            print(f"CHAT COMMANDS WARNING: {short_error_text(e)}")
+    try:
+        await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=chat_id))
+        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
+    except Exception as e:
+        print(f"CHAT COMMANDS WARNING: {short_error_text(e)}")
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -1203,10 +1199,8 @@ async def send_ai_error_to_admin(error_text: str):
 
 
 async def animate_thinking(message: Message, base_text: str = "Печатает ответ"):
-    """Small Telegram-safe loading animation.
-    Telegram cannot do real particle dispersion inside a bubble, so we imitate it
-    with live dots and then quietly remove the loading bubble before final answer.
-    """
+    """Small Telegram-safe loading animation."""
+    # Чуть быстрее, чем раньше, чтобы индикатор выглядел живее.
     states = [f"{base_text}.", f"{base_text}..", f"{base_text}..."]
     idx = 0
     try:
@@ -1220,15 +1214,34 @@ async def animate_thinking(message: Message, base_text: str = "Печатает 
         return
 
 
+async def animate_voice_preparing(message: Message):
+    """Animated voice-preparing status with larger Telegram-friendly dots."""
+    states = [
+        "🔊 Голосовой ответ готовится ●",
+        "🔊 Голосовой ответ готовится ●●",
+        "🔊 Голосовой ответ готовится ●●●",
+    ]
+    idx = 0
+    try:
+        while True:
+            await message.edit_text(states[idx % len(states)])
+            idx += 1
+            await asyncio.sleep(0.42)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+
+
 async def finish_loading_message(wait_message: Message):
     # Имитация мягкого исчезновения: коротко убираем точки и удаляем loading.
     try:
         await wait_message.edit_text("...")
-        await asyncio.sleep(0.10)
+        await asyncio.sleep(0.15)
         await wait_message.edit_text("..")
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.12)
         await wait_message.edit_text(".")
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.08)
         await wait_message.delete()
     except Exception:
         try:
@@ -1256,14 +1269,17 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
-    # ВАЖНО: не удаляем сообщение /start.
-    # На некоторых клиентах Telegram это вызывает огромную синюю кнопку «Старт»,
-    # которая перекрывает поле ввода. Командное меню чистим отдельно.
+    # /start должен работать, но не должен дублировать приветствие и засорять чат.
     await clear_start_for_chat(message.chat.id)
 
     now = time.time()
     last = recent_starts.get(message.from_user.id, 0)
-    if now - last < 2:
+    if now - last < 10:
+        # Если пользователь случайно нажал Start повторно, не отправляем второй welcome-блок.
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return
     recent_starts[message.from_user.id] = now
 
@@ -1278,6 +1294,12 @@ async def start_handler(message: Message):
         parse_mode="HTML",
         link_preview_options=no_preview(),
     )
+    # Удаляем именно команду пользователя после ответа. Так /start не висит в чате,
+    # но приветствие уже отправлено и большая системная кнопка Start не должна появляться.
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 @dp.message(Command("account"))
@@ -2305,12 +2327,25 @@ async def document_handler(message: Message):
 async def send_fast_voice_reply(message: Message, answer: str):
     """Generate a short voice reply in background so text answer stays instant."""
     status_message = None
+    animation_task = None
     try:
-        status_message = await message.answer("🔊 Голосовой ответ готовится в фоне...")
+        status_message = await message.answer("🔊 Голосовой ответ готовится ●")
+        animation_task = asyncio.create_task(animate_voice_preparing(status_message))
+
         audio_reply = await text_to_speech(answer)
+
+        if animation_task:
+            animation_task.cancel()
+            try:
+                await animation_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
         if not audio_reply:
             if status_message:
-                await status_message.edit_text("⚠️ Не удалось подготовить голосовой ответ.")
+                await status_message.edit_text("⚠️ Голосовой ответ не получился, но текстовый ответ выше уже готов.")
             return
 
         filename = "vsotah_voice_reply.ogg"
@@ -2324,6 +2359,12 @@ async def send_fast_voice_reply(message: Message, answer: str):
                 await status_message.edit_text("✅ Голосовой ответ отправлен.")
 
     except Exception as voice_reply_error:
+        if animation_task:
+            animation_task.cancel()
+            try:
+                await animation_task
+            except Exception:
+                pass
         await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
         print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
         if status_message:
