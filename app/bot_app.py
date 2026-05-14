@@ -2347,9 +2347,22 @@ async def document_handler(message: Message):
 async def send_fast_voice_reply(message: Message, answer: str):
     """Generate a short voice reply in background so text answer stays instant."""
     status_message = None
+    loading_task = None
     try:
-        status_message = await message.answer("🔊 Голосовой ответ готовится в фоне...")
+        status_message = await message.answer("🔊 Голосовой ответ готовится...")
+        loading_task = asyncio.create_task(animate_thinking(status_message, "🔊 Голосовой ответ готовится"))
+
         audio_reply = await text_to_speech(answer)
+
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
         if not audio_reply:
             if status_message:
                 await status_message.edit_text("⚠️ Не удалось подготовить голосовой ответ.")
@@ -2366,6 +2379,14 @@ async def send_fast_voice_reply(message: Message, answer: str):
                 await status_message.edit_text("✅ Голосовой ответ отправлен.")
 
     except Exception as voice_reply_error:
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
         print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
         if status_message:
