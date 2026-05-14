@@ -93,7 +93,7 @@ ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lowe
 PORT = int(os.getenv("PORT", "8080"))
 WEBHOOK_MODE = os.getenv("WEBHOOK_MODE", "false").lower() in {"1", "true", "yes", "on"}
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"/telegram-webhook/{BOT_TOKEN}")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram-webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 STARTED_AT = datetime.utcnow()
 
@@ -2628,8 +2628,26 @@ async def health_handler(request):
         "ok": True,
         "service": "vsotah-bot",
         "mode": "webhook" if WEBHOOK_MODE else "polling",
-        "webhook_configured": bool(WEBHOOK_URL) if WEBHOOK_MODE else False,
+        "webhook_path": WEBHOOK_PATH if WEBHOOK_MODE else None,
     })
+
+
+async def telegram_webhook_handler(request):
+    if WEBHOOK_SECRET:
+        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if received_secret != WEBHOOK_SECRET:
+            return web.json_response({"ok": False, "error": "forbidden"}, status=403)
+
+    try:
+        data = await request.json()
+        update = Update.model_validate(data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        print(f"TELEGRAM WEBHOOK ERROR: {e}")
+        print(traceback.format_exc())
+        return web.json_response({"ok": False}, status=500)
+
+    return web.json_response({"ok": True})
 
 
 async def tribute_webhook_handler(request):
@@ -2642,32 +2660,12 @@ async def tribute_webhook_handler(request):
     return web.json_response({"ok": True})
 
 
-async def telegram_webhook_handler(request):
-    if WEBHOOK_SECRET:
-        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if secret != WEBHOOK_SECRET:
-            return web.json_response({"ok": False, "error": "forbidden"}, status=403)
-
-    try:
-        update_data = await request.json()
-        update = Update.model_validate(update_data, context={"bot": bot})
-        await dp.feed_update(bot, update)
-    except Exception as e:
-        print(f"TELEGRAM WEBHOOK ERROR: {e}")
-        print(traceback.format_exc())
-        try:
-            await log_event(None, "telegram_webhook_error", str(e)[:1000])
-        except Exception:
-            pass
-
-    return web.json_response({"ok": True})
-
-
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_post("/tribute-webhook", tribute_webhook_handler)
+
     if WEBHOOK_MODE:
         app.router.add_post(WEBHOOK_PATH, telegram_webhook_handler)
 
@@ -2676,6 +2674,21 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"WEB SERVER STARTED ON PORT {PORT}")
+    return runner
+
+
+async def setup_webhook():
+    if not WEBHOOK_URL:
+        raise RuntimeError("WEBHOOK_URL is missing while WEBHOOK_MODE=true")
+
+    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    await bot.set_webhook(
+        webhook_url,
+        drop_pending_updates=False,
+        secret_token=WEBHOOK_SECRET or None,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
+    print(f"WEBHOOK SET: {webhook_url}")
 
 
 async def main():
@@ -2695,27 +2708,15 @@ async def main():
     await setup_bot_info()
     await start_web_server()
 
-    if WEBHOOK_MODE:
-        if not WEBHOOK_URL:
-            raise RuntimeError("WEBHOOK_URL is required when WEBHOOK_MODE=true")
-
-        webhook_full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        await bot.set_webhook(
-            webhook_full_url,
-            drop_pending_updates=False,
-            secret_token=WEBHOOK_SECRET or None,
-        )
-        print(f"WEBHOOK SET: {webhook_full_url}")
-    else:
-        await bot.delete_webhook(drop_pending_updates=True)
-
     print("DATABASE CONNECTED")
     print("BOT STARTED")
 
     if WEBHOOK_MODE:
+        await setup_webhook()
         print("BOT RUNNING IN WEBHOOK MODE")
         await asyncio.Event().wait()
     else:
+        await bot.delete_webhook(drop_pending_updates=True)
         print("BOT RUNNING IN POLLING MODE")
         await dp.start_polling(bot)
 
