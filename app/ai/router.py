@@ -175,7 +175,9 @@ def build_search_query(text: str) -> str:
 
 
 
-AI_QUALITY_LAYER_VERSION = "AI Quality Layer 1.0"
+AI_QUALITY_LAYER_VERSION = "AI Quality Layer 1.1"
+AI_AGENT_MODES_VERSION = "AI Agents / Task Modes 1.0"
+REAL_MODEL_ROUTER_VERSION = "Real Model Router 3.0"
 
 
 def detect_task_type(text: str, mode: str = "chat") -> str:
@@ -183,18 +185,72 @@ def detect_task_type(text: str, mode: str = "chat") -> str:
     t = (text or "").lower()
     if mode in {"research", "business", "code", "web"}:
         return mode
-    if any(x in t for x in ["код", "ошибка", "traceback", "python", "github", "railway", "api", "deploy", "syntaxerror"]):
+    if any(x in t for x in ["код", "ошибка", "traceback", "python", "github", "railway", "api", "deploy", "syntaxerror", "лог", "логи", "docker", "requirements"]):
         return "code"
-    if any(x in t for x in ["договор", "кп", "продажи", "бизнес", "клиент", "маркетинг", "выручка", "прибыль", "стратегия"]):
+    if any(x in t for x in ["договор", "кп", "продажи", "бизнес", "клиент", "маркетинг", "выручка", "прибыль", "стратегия", "юкасса", "оферта", "счёт", "счет"]):
         return "business"
-    if any(x in t for x in ["проанализируй", "исследуй", "сравни", "почему", "причины", "риски", "вывод", "отчет", "отчёт"]):
+    if any(x in t for x in ["pdf", "docx", "xlsx", "таблиц", "файл", "документ", "договор", "презентац", "резюме"]):
+        return "file"
+    if any(x in t for x in ["проанализируй", "исследуй", "сравни", "почему", "причины", "риски", "вывод", "отчет", "отчёт", "подробно разбер", "найди плюсы"]):
         return "analysis"
     if wants_live_web(text):
         return "web"
-    if any(x in t for x in ["напиши", "придумай", "пост", "текст", "сценарий", "реклама", "описание"]):
+    if any(x in t for x in ["напиши", "придумай", "пост", "текст", "сценарий", "реклама", "описание", "название", "слоган", "ролик"]):
         return "writing"
     return "general"
 
+
+def detect_agent_mode(text: str, mode: str = "chat") -> str:
+    """AI Agents / Task Modes 1.0: silent internal mode selection."""
+    task = detect_task_type(text, mode)
+    if mode == "research" or task in {"analysis", "web"}:
+        return "research_agent"
+    if mode == "business" or task == "business":
+        return "business_agent"
+    if mode == "code" or task == "code":
+        return "code_agent"
+    if task == "file":
+        return "file_agent"
+    if task == "writing":
+        return "creative_agent"
+    return "general_agent"
+
+
+def agent_mode_instruction(query: str, mode: str = "chat") -> str:
+    agent = detect_agent_mode(query, mode)
+    if agent == "research_agent":
+        return (
+            f"{AI_AGENT_MODES_VERSION}: Research Agent. "
+            "Сначала отдели проверенные факты от предположений. Для актуальных тем опирайся на live evidence. "
+            "Дай короткий вывод в начале, затем 2–5 важных пунктов. Не выдумывай детали и даты."
+        )
+    if agent == "business_agent":
+        return (
+            f"{AI_AGENT_MODES_VERSION}: Business Agent. "
+            "Думай как практичный бизнес-помощник: цель, риски, деньги, сроки, следующий шаг. "
+            "Давай готовые формулировки для писем, КП, оферт, продаж и операционных задач."
+        )
+    if agent == "code_agent":
+        return (
+            f"{AI_AGENT_MODES_VERSION}: Code Agent. "
+            "Сначала найди причину ошибки, потом дай безопасное решение. Не предлагай переписывать проект с нуля. "
+            "Если речь о VSotahBot, уважай модульную архитектуру и не трогай лишние файлы."
+        )
+    if agent == "file_agent":
+        return (
+            f"{AI_AGENT_MODES_VERSION}: File Agent. "
+            "Для документов и таблиц выделяй суть, ошибки, риски, цифры и следующие действия. "
+            "Не придумывай данные, которых нет в файле."
+        )
+    if agent == "creative_agent":
+        return (
+            f"{AI_AGENT_MODES_VERSION}: Creative Agent. "
+            "Давай готовый текст/идею без долгого объяснения процесса. Пиши живо, но без лишней воды."
+        )
+    return (
+        f"{AI_AGENT_MODES_VERSION}: General Agent. "
+        "Отвечай как умный универсальный помощник: прямо, полезно, без технического мусора."
+    )
 
 def quality_layer_instruction(query: str, mode: str = "chat", web_requested: bool = False, web_ready: bool = False) -> str:
     """Universal answer-quality rules for VSotah AI.
@@ -966,10 +1022,52 @@ async def enrich_messages_with_web(messages: list[dict], force_web: bool = False
     quality = build_web_quality_instruction(query, results)
     return [{"role": "system", "content": quality + "\n\n" + context}, *messages], True, True
 
+
+
+def selected_model_profile_instruction(selected_model: str) -> str:
+    """Real Model Router 3.0 provider identity and style instructions."""
+    model = (selected_model or "gpt").lower()
+    if model == "claude":
+        return (
+            f"{REAL_MODEL_ROUTER_VERSION}: selected model is Claude. Primary provider: Anthropic. "
+            "Style: careful reasoning, structured analysis, cautious wording on uncertain facts. "
+            "If fallback provider is used, keep Claude-like clarity but do not claim provider internals to the user."
+        )
+    if model == "gemini":
+        return (
+            f"{REAL_MODEL_ROUTER_VERSION}: selected model is Gemini. Primary provider: Google Gemini. "
+            "Style: fast practical synthesis, good multimodal/file reasoning, concise explanations. "
+            "If fallback provider is used, keep Gemini-like directness but do not expose provider internals."
+        )
+    if model == "deepseek":
+        return (
+            f"{REAL_MODEL_ROUTER_VERSION}: selected model is DeepSeek. Primary provider: DeepSeek. "
+            "Style: strong code/math/logical reasoning, step-by-step only when useful. "
+            "If fallback provider is used, keep the answer technical and precise without exposing internals."
+        )
+    return (
+        f"{REAL_MODEL_ROUTER_VERSION}: selected model is ChatGPT. Primary provider: OpenAI. "
+        "Style: balanced, friendly, practical, strong general assistant. "
+        "If fallback provider is used, keep the same clean user-facing style and do not expose internals."
+    )
+
+
+def provider_health_config() -> dict[str, bool]:
+    """Helper for router-level provider availability."""
+    return {
+        "openai": bool(openai_client),
+        "anthropic": bool(anthropic_client),
+        "gemini": bool(google_client),
+        "deepseek": bool(deepseek_client),
+        "web": web_is_configured(),
+    }
+
 def provider_order(selected_model: str, task: str = "text") -> list[str]:
-    """
-    AI Router 3.0: основной провайдер зависит от выбранной модели,
-    дальше идут fallback-провайдеры, если API временно недоступен.
+    """Real Model Router 3.0.
+
+    The first provider is the real selected provider:
+    ChatGPT -> OpenAI, Claude -> Anthropic, Gemini -> Google, DeepSeek -> DeepSeek.
+    Fallbacks are used only if the primary provider is unavailable or fails.
     """
     selected_model = (selected_model or "gpt").lower()
 
@@ -980,15 +1078,19 @@ def provider_order(selected_model: str, task: str = "text") -> list[str]:
             "gemini": ["gemini", "openai", "anthropic"],
             "deepseek": ["openai", "gemini", "anthropic"],
         }
-        return orders.get(selected_model, ["openai", "gemini", "anthropic"])
+        order = orders.get(selected_model, ["openai", "gemini", "anthropic"])
+    else:
+        orders = {
+            "gpt": ["openai", "gemini", "anthropic", "deepseek"],
+            "claude": ["anthropic", "openai", "gemini", "deepseek"],
+            "gemini": ["gemini", "openai", "anthropic", "deepseek"],
+            "deepseek": ["deepseek", "openai", "gemini", "anthropic"],
+        }
+        order = orders.get(selected_model, ["openai", "gemini", "anthropic", "deepseek"])
 
-    orders = {
-        "gpt": ["openai", "gemini", "anthropic", "deepseek"],
-        "claude": ["anthropic", "openai", "gemini", "deepseek"],
-        "gemini": ["gemini", "openai", "anthropic", "deepseek"],
-        "deepseek": ["deepseek", "openai", "gemini", "anthropic"],
-    }
-    return orders.get(selected_model, ["openai", "gemini", "anthropic", "deepseek"])
+    available = provider_health_config()
+    filtered = [provider for provider in order if available.get(provider, False)]
+    return filtered or order
 
 
 async def run_with_fallback(
@@ -1114,11 +1216,14 @@ async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat
     dialogue_messages = [msg for msg in messages if msg.get("role") != "system"]
     memory = build_memory(dialogue_messages, limit=TEXT_HISTORY_LIMIT)
 
+    user_query = latest_user_text(messages)
     base_system = system_prompt(get_personality(selected_model))
     extra = mode_instruction(mode)
     if extra:
         base_system = f"{base_system}\n\n{extra}"
-    quality = quality_layer_instruction(latest_user_text(messages), mode, web_requested=web_requested, web_ready=web_ready)
+    base_system = f"{base_system}\n\n{selected_model_profile_instruction(selected_model)}"
+    base_system = f"{base_system}\n\n{agent_mode_instruction(user_query, mode)}"
+    quality = quality_layer_instruction(user_query, mode, web_requested=web_requested, web_ready=web_ready)
     base_system = f"{base_system}\n\n{quality}"
     if system_contexts:
         base_system = f"{base_system}\n\n" + "\n\n".join(system_contexts[-3:])
