@@ -51,7 +51,7 @@ async def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> s
 
 
 async def text_to_speech(text: str) -> bytes:
-    """Optional AI voice reply. Disabled in bot_app unless VOICE_REPLY_ENABLED=true."""
+    """Generate AI voice reply. Default voice is nova: pleasant female voice."""
     if not openai_client:
         raise VoiceProviderUnavailable("OPENAI_API_KEY is missing")
 
