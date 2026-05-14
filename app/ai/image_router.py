@@ -26,6 +26,8 @@ ImageAction = Literal[
     "avatar_crop",
     "logo_enhance",
     "background_replace",
+    "background_remove",
+    "variation",
 ]
 
 
@@ -85,6 +87,10 @@ def detect_image_action(prompt: str | None, has_source_image: bool = False) -> I
 
     if _has_any(text, ["убери", "удали", "remove", "erase", "без "]):
         return "remove_object"
+    if _has_any(text, ["убери фон", "удали фон", "без фона", "remove background", "transparent background", "прозрачный фон"]):
+        return "background_remove" if has_source_image else "generate"
+    if _has_any(text, ["вариация", "вариант", "variation", "похожие варианты", "ещё варианты"]):
+        return "variation" if has_source_image else "generate"
     if _has_any(text, ["фон", "background", "замени фон", "поменяй фон"]):
         return "background_replace" if has_source_image else "generate"
     if _has_any(text, ["почисти", "очисти", "убрать мусор", "cleanup", "clean up", "выровняй"]):
@@ -153,7 +159,7 @@ def build_image_plan(prompt: str | None, has_source_image: bool = False) -> Imag
     aspect_ratio = infer_aspect_ratio(prompt, kind)
 
     quality_by_kind = {
-        "logo": "premium minimal vector-like mark, clean geometry, memorable silhouette, balanced negative space, no random letters",
+        "logo": "premium minimal vector-like mark, clean geometry, memorable silhouette, balanced negative space, app-icon ready, no random letters",
         "avatar": "centered subject, close-up composition, sharp focus, clean background, strong readable silhouette",
         "ui": "modern premium mobile interface, clean spacing, realistic app layout, readable structure without fake small text",
         "meme": "clear composition, expressive subject, simple background, no unreadable fake text unless requested",
@@ -169,7 +175,7 @@ def build_image_plan(prompt: str | None, has_source_image: bool = False) -> Imag
 
     safety_notes = (
         "Follow the user's subject literally. Do not add random captions, watermarks, logos, extra fingers, fake UI text, "
-        "or unrelated objects. Preserve requested colors, composition, and brand words only when explicitly requested."
+        "unreadable letters, duplicated objects or unrelated details. Preserve requested colors, composition, identity and brand words only when explicitly requested."
     )
 
     return ImagePlan(
@@ -193,7 +199,7 @@ def build_image_generation_prompt(user_prompt: str | None, image_model: str = "i
         f"Target aspect ratio: {plan.aspect_ratio}\n"
         f"Quality direction: {plan.quality_notes}\n"
         f"Rules: {plan.safety_notes}\n\n"
-        "Create one polished final image. The result must match the user's request literally."
+        "Create one polished final image. The result must match the user's request literally. Avoid visual clutter and random text."
     )[:3000]
 
 
@@ -204,8 +210,10 @@ def build_image_edit_prompt(user_prompt: str | None) -> str:
     action_instructions = {
         "remove_object": "Remove only the requested object or distraction. Reconstruct the background naturally.",
         "background_replace": "Replace or improve the background as requested while keeping the main subject unchanged.",
+        "background_remove": "Remove the background cleanly. Keep the main subject sharp, centered and natural. Use a transparent or clean plain background when supported.",
+        "variation": "Create a polished variation of the original image while preserving the main subject, composition idea and recognizable identity.",
         "cleanup": "Clean visual noise, stray objects, bad edges, clutter, artifacts, and distracting background elements.",
-        "upscale": "Improve clarity, sharpness, texture, and overall quality without changing the identity or composition.",
+        "upscale": "Improve clarity, sharpness, texture, edges and overall quality without changing the identity or composition.",
         "avatar_crop": "Create a clean square avatar-style composition with the subject larger and centered.",
         "logo_enhance": "Enhance the logo shape, symmetry, contrast, and premium look without adding unrelated symbols.",
         "edit": "Apply the requested edit while preserving the original subject and important details.",
@@ -218,7 +226,9 @@ def build_image_edit_prompt(user_prompt: str | None) -> str:
         f"Detected type: {plan.kind}\n"
         f"Instruction: {action_instructions.get(plan.action, action_instructions['edit'])}\n"
         f"Quality direction: {plan.quality_notes}\n"
-        "Preserve the original subject, identity, pose, perspective, and important details unless the user explicitly asks to change them. "
+        "Preserve the original subject, identity, pose, perspective, aspect idea and important details unless the user explicitly asks to change them. "
+        "For background removal, keep edges clean and avoid cutting off hair, hands, logos or object details. "
+        "For upscale, improve quality without changing the picture content. "
         f"Rules: {plan.safety_notes}"
     )[:2500]
 
