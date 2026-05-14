@@ -1,17 +1,14 @@
+"""Webhook helpers for VSotahBot.
+
+The production webhook route is registered from app.bot_app without replacing
+existing handlers. This file is intentionally small: it documents the ENV
+variables and keeps webhook-related architecture explicit.
+
+ENV:
+- WEBHOOK_MODE=true
+- WEBHOOK_URL=https://your-railway-domain.up.railway.app
+- WEBHOOK_PATH=/telegram-webhook  # optional
+- WEBHOOK_SECRET=any-random-secret # optional, recommended later
 """
-Webhook helper module for VSotahBot.
 
-The active webhook route is intentionally registered inside app.bot_app.start_web_server()
-so the existing Telegram handlers, voice pipeline, loading animation, referrals,
-payments, and /start behavior stay unchanged.
-"""
-
-import os
-
-
-def webhook_enabled() -> bool:
-    return os.getenv("WEBHOOK_MODE", "false").lower() in {"1", "true", "yes", "on"}
-
-
-def webhook_url() -> str:
-    return os.getenv("WEBHOOK_URL", "").rstrip("/")
+DEFAULT_WEBHOOK_PATH = "/telegram-webhook"
