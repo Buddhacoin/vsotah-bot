@@ -43,6 +43,7 @@ DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-v4-flash")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "gemini-3-pro-image-preview")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-2")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
+NANO_BANANA_ALLOW_LEGACY_FALLBACK = os.getenv("NANO_BANANA_ALLOW_LEGACY_FALLBACK", "false").lower() in {"1", "true", "yes", "on"}
 
 TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "10"))
 VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
@@ -1436,6 +1437,7 @@ async def enhance_image_edit_prompt(user_prompt: str) -> str:
         "You are a professional prompt engineer for AI image editing. "
         "Translate the user's request to clear English. "
         "The edit must preserve the original subject, face, identity, pose, and important details unless the user explicitly asks to change them. "
+        "For photo enhancement, make a visibly improved version: better sharpness, exposure, skin tone, texture, noise reduction and natural detail, not the unchanged original. "
         "Do not add random text, signs, watermarks, logos, or fake letters. "
         "Return ONLY the final English edit instruction, without explanations."
     )
@@ -1605,8 +1607,14 @@ async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
     except Exception as e:
         print(f"NANO BANANA NATIVE IMAGE ERROR: {short_error_text(e)}")
 
-    # Compatibility fallback for older Google image endpoints if the account does not yet
-    # expose Nano Banana Pro through generate_content.
+    # Не подменяем Nano Banana Pro старым Imagen по умолчанию.
+    # Если у ключа Google нет доступа к native image-модели, лучше честно показать
+    # недоступность, чем выдавать старую модель за Nano Banana Pro.
+    if not NANO_BANANA_ALLOW_LEGACY_FALLBACK:
+        return None, "⚠️ Nano Banana Pro сейчас недоступен на этом Google API-ключе. Используйте GPT Image или включите реальный доступ к Nano Banana Pro."
+
+    # Опциональный legacy fallback, только если явно включить в Railway:
+    # NANO_BANANA_ALLOW_LEGACY_FALLBACK=true
     try:
         def run_imagen_fallback() -> tuple[bytes | None, str]:
             response = google_client.models.generate_images(
