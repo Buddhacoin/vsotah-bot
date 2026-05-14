@@ -65,6 +65,9 @@ RESEARCH_MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS", "1800"))
 BUSINESS_MAX_TOKENS = int(os.getenv("BUSINESS_MAX_TOKENS", "1600"))
 CODE_MAX_TOKENS = int(os.getenv("CODE_MAX_TOKENS", "1800"))
 
+REAL_MODEL_ROUTER_VERSION = "3.0"
+REAL_MODEL_ROUTER_RETRIES = int(os.getenv("REAL_MODEL_ROUTER_RETRIES", "2"))
+
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 google_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
@@ -832,77 +835,6 @@ async def direct_live_answer(query: str, force_web: bool = False) -> str:
 
     return ""
 
-
-def compact_sources_for_user(results: list[dict], max_sources: int = 2) -> str:
-    sources = []
-    seen = set()
-    for item in results:
-        if item.get("kind") == "answer":
-            continue
-        title = (item.get("title") or "Источник").strip()
-        url = (item.get("url") or "").strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        title = re.sub(r"\s+", " ", title)[:80]
-        sources.append(f"• {title}: {url}")
-        if len(sources) >= max_sources:
-            break
-    return "\n".join(sources)
-
-
-async def synthesize_live_web_answer(selected_model: str, original_messages: list[dict], query: str, results: list[dict], mode: str = "chat") -> str:
-    """Turn web evidence into a real answer instead of letting a stale model guess.
-
-    This is the core fix: for live/current questions we do not simply add snippets
-    to the normal chat and hope the model notices them. We force a dedicated
-    evidence-grounded answer. If evidence is weak, the answer must say so rather
-    than hallucinate.
-    """
-    evidence = render_web_context(results)
-    if not evidence:
-        return "Не удалось надежно проверить актуальные данные прямо сейчас. Попробуйте уточнить вопрос или повторить чуть позже."
-
-    dialogue = messages_to_plain_text([m for m in original_messages[-TEXT_HISTORY_LIMIT:] if m.get("role") in {"user", "assistant"}])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    system_text = (
-        f"Ты умный AI-ассистент VSotahBot. Сегодня {today} UTC. "
-        "Пользователь ждёт ответ уровня современного AI с интернетом. "
-        "Отвечай только на русском, если пользователь явно не просит другой язык. "
-        "Используй только данные из LIVE WEB EVIDENCE для актуальных фактов. "
-        "Не выдумывай свежие факты, даты, цены, должности, новости и события. "
-        "Если найденные источники не отвечают на вопрос или выглядят нерелевантными, прямо скажи: "
-        "'Не удалось надежно проверить актуальные данные'. "
-        "Не упоминай Tavily, API, ключи, Railway, администратора, внутренние инструменты или ошибки интеграции. "
-        "Не вставляй сырые snippets, JSON и длинные списки ссылок. "
-        "Ответ должен быть чистым: сначала прямой ответ, потом 1-3 коротких уточнения. "
-        "Источники добавляй только если они реально полезны, максимум 2 строки в конце."
-    )
-    if mode == "research":
-        system_text += " Для research-запроса дай краткий структурированный отчёт: вывод, факты, риски/ограничения."
-
-    user_prompt = (
-        f"Вопрос пользователя: {normalize_search_query(query)}\n\n"
-        f"Контекст диалога:\n{dialogue[-3000:]}\n\n"
-        f"{evidence}\n\n"
-        "Сформируй финальный ответ пользователю. Не фантазируй за пределами evidence."
-    )
-    messages = [
-        {"role": "system", "content": system_text},
-        {"role": "user", "content": user_prompt},
-    ]
-    calls = {
-        "openai": lambda: openai_chat(messages, OPENAI_TEXT_MODEL, TEXT_MAX_TOKENS, 0.2),
-        "anthropic": lambda: anthropic_chat(system_text, [{"role": "user", "content": user_prompt}], ANTHROPIC_TEXT_MODEL, TEXT_MAX_TOKENS, 0.2),
-        "gemini": lambda: gemini_chat(system_text, [{"role": "user", "content": user_prompt}], GEMINI_TEXT_MODEL),
-        "deepseek": lambda: deepseek_chat(messages, TEXT_MAX_TOKENS, 0.2),
-    }
-    answer = await run_with_fallback(provider_order(selected_model, "text"), calls, f"live-web:{selected_model}")
-    answer = clean_ai_answer(answer)
-    if not answer or "нейросети временно недоступны" in answer.lower():
-        return "Не удалось надежно проверить актуальные данные прямо сейчас. Попробуйте повторить чуть позже."
-    return answer
-
 def mode_instruction(mode: str) -> str:
     if mode == "research":
         return (
@@ -965,6 +897,35 @@ async def enrich_messages_with_web(messages: list[dict], force_web: bool = False
     quality = build_web_quality_instruction(query, results)
     return [{"role": "system", "content": quality + "\n\n" + context}, *messages], True, True
 
+
+def selected_model_instruction(selected_model: str) -> str:
+    """Give each selected AI a real behavior profile without touching Telegram UI.
+
+    The provider router already sends ChatGPT/Claude/Gemini/DeepSeek to their
+    own API first. This instruction makes the answer style and reasoning profile
+    match the chosen model while fallbacks stay invisible to the user.
+    """
+    model = (selected_model or "gpt").lower()
+    profiles = {
+        "gpt": (
+            "Selected AI: ChatGPT/OpenAI. Style: fast, practical, balanced, clear. "
+            "Prefer direct useful answers, good structure, and no unnecessary caveats."
+        ),
+        "claude": (
+            "Selected AI: Claude/Anthropic. Style: careful, thoughtful, strong at writing, analysis, documents and nuanced reasoning. "
+            "Be precise and avoid overclaiming."
+        ),
+        "gemini": (
+            "Selected AI: Gemini/Google. Style: concise, factual, strong at multimodal and fresh/contextual reasoning. "
+            "Be structured and practical."
+        ),
+        "deepseek": (
+            "Selected AI: DeepSeek. Style: strong at logic, code, math and technical reasoning. "
+            "Show clean steps only when useful, avoid long hidden reasoning."
+        ),
+    }
+    return profiles.get(model, profiles["gpt"])
+
 def provider_order(selected_model: str, task: str = "text") -> list[str]:
     """
     AI Router 3.0: основной провайдер зависит от выбранной модели,
@@ -1001,19 +962,28 @@ async def run_with_fallback(
         call = calls.get(provider)
         if not call:
             continue
-        try:
-            result = await asyncio.wait_for(call(), timeout=AI_TIMEOUT_SECONDS)
-            result = clean_ai_answer(_safe_text(result))
-            if result:
-                if errors:
-                    print(f"AI ROUTER FALLBACK OK | task={task_name} | provider={provider} | previous={'; '.join(errors)}")
-                return result
-            errors.append(f"{provider}: empty response")
-        except ProviderUnavailable as e:
-            errors.append(f"{provider}: {short_error_text(e)}")
-        except Exception as e:
-            errors.append(f"{provider}: {short_error_text(e)}")
-            print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | {short_error_text(e)}")
+
+        attempts = max(1, REAL_MODEL_ROUTER_RETRIES)
+        for attempt in range(1, attempts + 1):
+            try:
+                result = await asyncio.wait_for(call(), timeout=AI_TIMEOUT_SECONDS)
+                result = clean_ai_answer(_safe_text(result))
+                if result:
+                    if errors:
+                        print(f"AI ROUTER FALLBACK OK | task={task_name} | provider={provider} | attempt={attempt} | previous={'; '.join(errors)}")
+                    return result
+                errors.append(f"{provider}: empty response")
+                break
+            except ProviderUnavailable as e:
+                errors.append(f"{provider}: {short_error_text(e)}")
+                break
+            except Exception as e:
+                err = short_error_text(e)
+                print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | attempt={attempt} | {err}")
+                if attempt >= attempts:
+                    errors.append(f"{provider}: {err}")
+                else:
+                    await asyncio.sleep(0.7 * attempt)
 
     print(f"AI ROUTER ALL FAILED | task={task_name} | {'; '.join(errors)}")
     return (
@@ -1090,28 +1060,17 @@ async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str
 
 async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat", force_web: bool = False) -> str:
     mode = (mode or "chat").lower()
-    query = latest_user_text(messages)
-    must_use_web = force_web or mode in {"web", "research"} or wants_live_web(query)
 
-    # Fast direct live answer for deterministic data like weather/crypto.
-    direct_answer = await direct_live_answer(query, force_web=must_use_web)
+    # Fast direct live answer for weather/crypto/current web questions.
+    # This prevents stale LLM replies like “I do not have access”.
+    direct_answer = await direct_live_answer(
+        latest_user_text(messages),
+        force_web=force_web or mode in {"web", "research"},
+    )
     if direct_answer:
         return direct_answer
 
-    # REAL INTERNET LAYER 2.0:
-    # If a question needs current/external facts, do a dedicated search + synthesis.
-    # Do not let the normal stale-memory chat path answer first.
-    if must_use_web:
-        if not web_is_configured():
-            return "Сейчас я не могу проверить актуальные онлайн-данные. Могу ответить только по общим знаниям, если вопрос не требует свежей информации."
-
-        results = await search_web(query)
-        if results:
-            return await synthesize_live_web_answer(selected_model, messages, query, results, mode)
-
-        return "Не удалось надежно проверить актуальные данные прямо сейчас. Попробуйте уточнить вопрос или повторить чуть позже."
-
-    messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=False)
+    messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=force_web or mode in {"web", "research"})
 
     # Important: web context is stored as system messages. OpenAI can consume these directly,
     # but Claude/Gemini paths use a separate system prompt. Move system-context into
@@ -1128,6 +1087,20 @@ async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat
     extra = mode_instruction(mode)
     if extra:
         base_system = f"{base_system}\n\n{extra}"
+
+    model_profile = selected_model_instruction(selected_model)
+    if model_profile:
+        base_system = f"{base_system}\n\n{model_profile}"
+
+    base_system = (
+        f"{base_system}\n\n"
+        "AI CORE 3.0 QUALITY RULES: Отвечай на русском, если пользователь пишет по-русски. "
+        "Не выдумывай свежие факты. Если вопрос требует актуальных данных — используй live web context, если он есть. "
+        "Если данных недостаточно, честно скажи, что не удалось надёжно проверить, и не придумывай детали. "
+        "Давай полезный ответ без технического мусора, без фраз про API/ключи/админа/Railway. "
+        "Стиль: ясно, уверенно, без воды, но с нужными оговорками там, где точность важна."
+    )
+
     if system_contexts:
         base_system = f"{base_system}\n\n" + "\n\n".join(system_contexts[-3:])
     if web_ready:
