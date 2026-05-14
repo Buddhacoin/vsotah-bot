@@ -832,6 +832,77 @@ async def direct_live_answer(query: str, force_web: bool = False) -> str:
 
     return ""
 
+
+def compact_sources_for_user(results: list[dict], max_sources: int = 2) -> str:
+    sources = []
+    seen = set()
+    for item in results:
+        if item.get("kind") == "answer":
+            continue
+        title = (item.get("title") or "Источник").strip()
+        url = (item.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title = re.sub(r"\s+", " ", title)[:80]
+        sources.append(f"• {title}: {url}")
+        if len(sources) >= max_sources:
+            break
+    return "\n".join(sources)
+
+
+async def synthesize_live_web_answer(selected_model: str, original_messages: list[dict], query: str, results: list[dict], mode: str = "chat") -> str:
+    """Turn web evidence into a real answer instead of letting a stale model guess.
+
+    This is the core fix: for live/current questions we do not simply add snippets
+    to the normal chat and hope the model notices them. We force a dedicated
+    evidence-grounded answer. If evidence is weak, the answer must say so rather
+    than hallucinate.
+    """
+    evidence = render_web_context(results)
+    if not evidence:
+        return "Не удалось надежно проверить актуальные данные прямо сейчас. Попробуйте уточнить вопрос или повторить чуть позже."
+
+    dialogue = messages_to_plain_text([m for m in original_messages[-TEXT_HISTORY_LIMIT:] if m.get("role") in {"user", "assistant"}])
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    system_text = (
+        f"Ты умный AI-ассистент VSotahBot. Сегодня {today} UTC. "
+        "Пользователь ждёт ответ уровня современного AI с интернетом. "
+        "Отвечай только на русском, если пользователь явно не просит другой язык. "
+        "Используй только данные из LIVE WEB EVIDENCE для актуальных фактов. "
+        "Не выдумывай свежие факты, даты, цены, должности, новости и события. "
+        "Если найденные источники не отвечают на вопрос или выглядят нерелевантными, прямо скажи: "
+        "'Не удалось надежно проверить актуальные данные'. "
+        "Не упоминай Tavily, API, ключи, Railway, администратора, внутренние инструменты или ошибки интеграции. "
+        "Не вставляй сырые snippets, JSON и длинные списки ссылок. "
+        "Ответ должен быть чистым: сначала прямой ответ, потом 1-3 коротких уточнения. "
+        "Источники добавляй только если они реально полезны, максимум 2 строки в конце."
+    )
+    if mode == "research":
+        system_text += " Для research-запроса дай краткий структурированный отчёт: вывод, факты, риски/ограничения."
+
+    user_prompt = (
+        f"Вопрос пользователя: {normalize_search_query(query)}\n\n"
+        f"Контекст диалога:\n{dialogue[-3000:]}\n\n"
+        f"{evidence}\n\n"
+        "Сформируй финальный ответ пользователю. Не фантазируй за пределами evidence."
+    )
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": user_prompt},
+    ]
+    calls = {
+        "openai": lambda: openai_chat(messages, OPENAI_TEXT_MODEL, TEXT_MAX_TOKENS, 0.2),
+        "anthropic": lambda: anthropic_chat(system_text, [{"role": "user", "content": user_prompt}], ANTHROPIC_TEXT_MODEL, TEXT_MAX_TOKENS, 0.2),
+        "gemini": lambda: gemini_chat(system_text, [{"role": "user", "content": user_prompt}], GEMINI_TEXT_MODEL),
+        "deepseek": lambda: deepseek_chat(messages, TEXT_MAX_TOKENS, 0.2),
+    }
+    answer = await run_with_fallback(provider_order(selected_model, "text"), calls, f"live-web:{selected_model}")
+    answer = clean_ai_answer(answer)
+    if not answer or "нейросети временно недоступны" in answer.lower():
+        return "Не удалось надежно проверить актуальные данные прямо сейчас. Попробуйте повторить чуть позже."
+    return answer
+
 def mode_instruction(mode: str) -> str:
     if mode == "research":
         return (
@@ -1019,17 +1090,28 @@ async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str
 
 async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat", force_web: bool = False) -> str:
     mode = (mode or "chat").lower()
+    query = latest_user_text(messages)
+    must_use_web = force_web or mode in {"web", "research"} or wants_live_web(query)
 
-    # Fast direct live answer for weather/crypto/current web questions.
-    # This prevents stale LLM replies like “I do not have access”.
-    direct_answer = await direct_live_answer(
-        latest_user_text(messages),
-        force_web=force_web or mode in {"web", "research"},
-    )
+    # Fast direct live answer for deterministic data like weather/crypto.
+    direct_answer = await direct_live_answer(query, force_web=must_use_web)
     if direct_answer:
         return direct_answer
 
-    messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=force_web or mode in {"web", "research"})
+    # REAL INTERNET LAYER 2.0:
+    # If a question needs current/external facts, do a dedicated search + synthesis.
+    # Do not let the normal stale-memory chat path answer first.
+    if must_use_web:
+        if not web_is_configured():
+            return "Сейчас я не могу проверить актуальные онлайн-данные. Могу ответить только по общим знаниям, если вопрос не требует свежей информации."
+
+        results = await search_web(query)
+        if results:
+            return await synthesize_live_web_answer(selected_model, messages, query, results, mode)
+
+        return "Не удалось надежно проверить актуальные данные прямо сейчас. Попробуйте уточнить вопрос или повторить чуть позже."
+
+    messages, web_requested, web_ready = await enrich_messages_with_web(messages, force_web=False)
 
     # Important: web context is stored as system messages. OpenAI can consume these directly,
     # but Claude/Gemini paths use a separate system prompt. Move system-context into
