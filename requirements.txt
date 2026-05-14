@@ -12,4 +12,3 @@ pdfplumber
 PyMuPDF
 python-docx
 openpyxl
-aiohttp
