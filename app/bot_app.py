@@ -48,6 +48,16 @@ from app.ai.file_router import (
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
 from app.referrals import build_referral_link, parse_referral_code, build_invite_text, build_telegram_share_url
+from app.performance import (
+    init_performance_layer,
+    cache_get,
+    cache_set,
+    cache_delete,
+    redis_health,
+    start_event_worker,
+    enqueue_event,
+    event_queue_size,
+)
     
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -504,7 +514,17 @@ async def init_db():
 
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
+    """Fast event logging.
+
+    In production this writes through a background queue so user-facing handlers do
+    not wait for PostgreSQL on every click/message. If the queue is not started
+    or is full, we fall back to the old direct DB insert.
+    """
     try:
+        queued = await enqueue_event(telegram_id, event_type, details[:1000])
+        if queued:
+            return
+
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO events (telegram_id, event_type, details) VALUES ($1, $2, $3)",
@@ -1047,9 +1067,15 @@ async def save_message(telegram_id, role, content):
             role,
             content[:12000],
         )
+    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
 
 
 async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
+    cache_key = f"history:{telegram_id}:{limit}"
+    cached_history = await cache_get(cache_key)
+    if cached_history is not None:
+        return cached_history
+
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
@@ -1063,12 +1089,15 @@ async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
     for row in reversed(rows):
         if row["role"] in {"user", "assistant", "system"}:
             history.append({"role": row["role"], "content": row["content"]})
+
+    await cache_set(cache_key, history, ttl_seconds=20)
     return history
 
 
 async def clear_chat(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE telegram_id=$1", telegram_id)
+    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
     await log_event(telegram_id, "delete_context")
 
 
@@ -1807,6 +1836,10 @@ async def admin_health_command(message: Message):
         except Exception as e:
             tavily_status = f"❌ ERROR: {short_error_text(e)[:90]}"
 
+    redis_ok, redis_latency_ms, redis_details = await redis_health()
+    queue_size = await event_queue_size()
+    redis_status = "✅ OK" if redis_ok else f"⚠️ {redis_details}"
+
     await message.answer(
         "🩺 VSotahBot Health\n\n"
         f"Bot API: {bot_status}\n"
@@ -1819,6 +1852,9 @@ async def admin_health_command(message: Message):
         f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
         f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
         f"Live Web / Tavily: {tavily_status}\n"
+        f"Redis cache: {redis_status}\n"
+        f"Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
+        f"Event queue: {queue_size}\n"
         f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
     )
 
@@ -2301,20 +2337,9 @@ async def document_handler(message: Message):
 async def send_fast_voice_reply(message: Message, answer: str):
     """Generate a short voice reply in background so text answer stays instant."""
     status_message = None
-    loading_task = None
     try:
-        status_message = await message.answer("🔊 Голосовой ответ готовится...")
-        loading_task = asyncio.create_task(animate_thinking(status_message, "🔊 Голосовой ответ готовится"))
-
+        status_message = await message.answer("🔊 Голосовой ответ готовится в фоне...")
         audio_reply = await text_to_speech(answer)
-
-        if loading_task:
-            loading_task.cancel()
-            try:
-                await loading_task
-            except asyncio.CancelledError:
-                pass
-
         if not audio_reply:
             if status_message:
                 await status_message.edit_text("⚠️ Не удалось подготовить голосовой ответ.")
@@ -2331,14 +2356,6 @@ async def send_fast_voice_reply(message: Message, answer: str):
                 await status_message.edit_text("✅ Голосовой ответ отправлен.")
 
     except Exception as voice_reply_error:
-        if loading_task:
-            loading_task.cancel()
-            try:
-                await loading_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
         await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
         print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
         if status_message:
@@ -2639,7 +2656,10 @@ async def main():
         raise RuntimeError("DATABASE_URL is missing")
 
     await bot.delete_webhook(drop_pending_updates=True)
+    redis_enabled = await init_performance_layer()
+    print(f"REDIS CACHE {'CONNECTED' if redis_enabled else 'DISABLED'}")
     await init_db()
+    await start_event_worker(db_pool)
     await setup_bot_info()
     await start_web_server()
 
@@ -2651,7 +2671,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
