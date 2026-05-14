@@ -895,11 +895,15 @@ async def clear_start_for_chat(chat_id: int):
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
     ]
-    try:
-        await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=chat_id))
-        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
-    except Exception as e:
-        print(f"CHAT COMMANDS WARNING: {short_error_text(e)}")
+    for language_code in [None, "ru", "en"]:
+        try:
+            kwargs = {"scope": BotCommandScopeChat(chat_id=chat_id)}
+            if language_code:
+                kwargs["language_code"] = language_code
+            await bot.delete_my_commands(**kwargs)
+            await bot.set_my_commands(commands, **kwargs)
+        except Exception as e:
+            print(f"CHAT COMMANDS WARNING: {short_error_text(e)}")
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -1209,7 +1213,7 @@ async def animate_thinking(message: Message, base_text: str = "Печатает 
         while True:
             await message.edit_text(states[idx % len(states)])
             idx += 1
-            await asyncio.sleep(0.55)
+            await asyncio.sleep(0.38)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1220,11 +1224,11 @@ async def finish_loading_message(wait_message: Message):
     # Имитация мягкого исчезновения: коротко убираем точки и удаляем loading.
     try:
         await wait_message.edit_text("...")
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.10)
         await wait_message.edit_text("..")
-        await asyncio.sleep(0.12)
-        await wait_message.edit_text(".")
         await asyncio.sleep(0.08)
+        await wait_message.edit_text(".")
+        await asyncio.sleep(0.06)
         await wait_message.delete()
     except Exception:
         try:
@@ -2632,8 +2636,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
 
 
 
