@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import os
-from io import BytesIO
+import csv
+import json
+from io import BytesIO, StringIO
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -41,13 +43,51 @@ def _limit_text(text: str) -> str:
     return (text or "")[:FILE_TEXT_LIMIT]
 
 
-def _decode_text_file(file_bytes: bytes) -> str:
+def _decode_text_raw(file_bytes: bytes) -> str:
     for encoding in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
         try:
-            return _limit_text(file_bytes.decode(encoding, errors="replace"))
+            return file_bytes.decode(encoding, errors="replace")
         except Exception:
             continue
-    return _limit_text(file_bytes.decode("utf-8", errors="replace"))
+    return file_bytes.decode("utf-8", errors="replace")
+
+
+def _decode_text_file(file_bytes: bytes) -> str:
+    return _limit_text(_decode_text_raw(file_bytes))
+
+
+def _extract_json_text(file_bytes: bytes) -> str:
+    raw = _decode_text_raw(file_bytes).strip()
+    try:
+        data = json.loads(raw)
+        pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        return _limit_text(pretty)
+    except Exception:
+        return _limit_text(raw)
+
+
+def _extract_csv_text(file_bytes: bytes) -> str:
+    raw = _decode_text_raw(file_bytes)
+    sample = raw[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample)
+    except Exception:
+        dialect = csv.excel
+
+    reader = csv.reader(StringIO(raw), dialect)
+    lines: list[str] = []
+    for index, row in enumerate(reader):
+        if index == 0:
+            lines.append("--- CSV headers / first row ---")
+        if index >= FILE_XLSX_MAX_ROWS:
+            lines.append(f"--- Показаны первые {FILE_XLSX_MAX_ROWS} строк CSV ---")
+            break
+        values = [str(cell).strip() for cell in row]
+        if any(values):
+            lines.append(" | ".join(values))
+        if len("\n".join(lines)) >= FILE_TEXT_LIMIT:
+            break
+    return _limit_text("\n".join(lines) or raw)
 
 
 def _extract_pdf_text(file_bytes: bytes) -> str:
@@ -139,13 +179,16 @@ def _extract_xlsx_text(file_bytes: bytes) -> str:
         lines: list[str] = []
 
         for ws in wb.worksheets[:FILE_XLSX_MAX_SHEETS]:
-            lines.append(f"--- Лист: {ws.title} ---")
+            lines.append(f"--- Лист: {ws.title} | строк: {ws.max_row} | колонок: {ws.max_column} ---")
+            non_empty_rows = 0
             for row in ws.iter_rows(max_row=FILE_XLSX_MAX_ROWS, values_only=True):
                 values = [str(v) if v is not None else "" for v in row]
                 if any(v.strip() for v in values):
+                    non_empty_rows += 1
                     lines.append(" | ".join(values))
                 if len("\n".join(lines)) >= FILE_TEXT_LIMIT:
                     return _limit_text("\n".join(lines))
+            lines.append(f"--- В выборке непустых строк: {non_empty_rows} ---")
 
         return _limit_text("\n".join(lines))
     except Exception as e:
@@ -159,7 +202,13 @@ def extract_document_text(filename: str, file_bytes: bytes) -> str:
     if ext not in SUPPORTED_FILE_TYPES:
         raise ValueError("UNSUPPORTED_FILE_TYPE")
 
-    if ext in {"txt", "md", "csv", "log", "json", "html", "htm"}:
+    if ext == "csv":
+        return _extract_csv_text(file_bytes)
+
+    if ext == "json":
+        return _extract_json_text(file_bytes)
+
+    if ext in {"txt", "md", "log", "html", "htm"}:
         return _decode_text_file(file_bytes)
 
     if ext == "pdf":
@@ -193,29 +242,84 @@ def detect_file_kind(filename: str, extracted_text: str = "") -> str:
     return "text_document"
 
 
+def detect_file_task(question: str, filename: str, extracted_text: str = "") -> str:
+    lower = f"{question}\n{filename}\n{extracted_text[:1200]}".lower()
+    if any(x in lower for x in ("договор", "контракт", "contract", "agreement", "соглашение")):
+        return "contract_review"
+    if any(x in lower for x in ("таблица", "xlsx", "csv", "excel", "выруч", "продаж", "аналитик", "аномал")):
+        return "spreadsheet_analysis"
+    if any(x in lower for x in ("кратко", "summary", "резюме", "сократи", "главное")):
+        return "summary"
+    if any(x in lower for x in ("ошибк", "проверь", "найди", "риск", "проблем")):
+        return "risk_check"
+    if any(x in lower for x in ("перепиши", "улучши", "сделай текст", "коммерческое", "кп", "письмо")):
+        return "rewrite_or_business"
+    return "general_analysis"
+
+
+def build_document_profile(filename: str, extracted_text: str) -> str:
+    ext = _extension(filename).upper() or "FILE"
+    file_kind = detect_file_kind(filename, extracted_text)
+    text = extracted_text or ""
+    lines = [line for line in text.splitlines() if line.strip()]
+    profile = [
+        f"Формат: {ext}",
+        f"Тип: {file_kind}",
+        f"Объём извлечённого текста: {len(text)} символов",
+        f"Непустых строк в выборке: {len(lines)}",
+    ]
+    if len(text) >= FILE_TEXT_LIMIT - 200:
+        profile.append("Важно: файл был обрезан до лимита анализа, поэтому отвечай только по доступной части.")
+    return "\n".join(f"• {item}" for item in profile)
+
+
 def build_file_analysis_prompt(question: str, filename: str, extracted_text: str) -> str:
     file_kind = detect_file_kind(filename, extracted_text)
+    task = detect_file_task(question, filename, extracted_text)
     question = question.strip() or "Проанализируй файл и выдели главное."
 
+    task_rules = {
+        "contract_review": (
+            "Фокус: договор/юридический документ. Выдели стороны, предмет, деньги, сроки, обязанности, штрафы, "
+            "расторжение, спорные места и риски. Не давай юридическую гарантию; формулируй как аналитический разбор."
+        ),
+        "spreadsheet_analysis": (
+            "Фокус: таблица/данные. Найди ключевые показатели, заметные изменения, аномалии, возможные ошибки, "
+            "выводы для бизнеса. Если точных расчётов нет в выборке — не придумывай цифры."
+        ),
+        "summary": "Фокус: краткое содержание. Дай сжатое резюме, главные мысли и что важно запомнить.",
+        "risk_check": "Фокус: проверка. Найди ошибки, противоречия, риски, слабые места и что стоит уточнить.",
+        "rewrite_or_business": "Фокус: деловая переработка. Помоги улучшить документ, сделать его яснее, сильнее и профессиональнее.",
+        "general_analysis": "Фокус: общий анализ. Дай понятный разбор, основные выводы и полезные следующие шаги.",
+    }
+
     return (
-        "Ты — premium файловый аналитик VSotah AI. "
-        "Отвечай дорого, профессионально, понятно и структурированно.\n\n"
-        f"Тип файла: {file_kind}\n"
+        "Ты — File AI PRO аналитик VSotah AI. Работай как сильный ассистент по документам, таблицам и файлам. "
+        "Отвечай на русском, уверенно, полезно и без воды.\n\n"
         f"Имя файла: {filename}\n"
+        f"Тип файла: {file_kind}\n"
+        f"Тип задачи: {task}\n"
         f"Вопрос пользователя: {question}\n\n"
-        "Правила ответа:\n"
-        "1. Не выдумывай данные, которых нет в файле.\n"
-        "2. Сначала дай краткое summary.\n"
-        "3. Затем выдели главные выводы списком.\n"
-        "4. Для таблиц ищи закономерности, аномалии, рост, падение и важные цифры.\n"
-        "5. Для договоров выделяй риски, сроки, обязательства и потенциально опасные пункты.\n"
-        "6. Для учебных материалов объясняй простым языком.\n"
-        "7. Используй аккуратные markdown-блоки и списки.\n"
-        "8. В конце всегда добавляй блок «Что можно сделать дальше».\n\n"
-        "Содержимое файла:\n"
+        "Профиль файла:\n"
+        f"{build_document_profile(filename, extracted_text)}\n\n"
+        "Правила качества:\n"
+        "1. Не выдумывай факты, цифры, пункты договора или строки таблицы, которых нет в извлечённом содержимом.\n"
+        "2. Сначала отвечай прямо по запросу пользователя, а не пересказывай весь файл подряд.\n"
+        "3. Если файл большой и часть текста обрезана, честно укажи, что анализ сделан по доступной части.\n"
+        "4. Для таблиц обращай внимание на заголовки, суммы, даты, пропуски, повторы и подозрительные значения.\n"
+        "5. Для договоров выделяй риски, сроки, деньги, обязанности, штрафы и неясные формулировки.\n"
+        "6. Для учебных/исследовательских файлов объясняй простым языком и выделяй структуру.\n"
+        "7. Не пиши технические детали про API, лимиты, токены или внутреннюю обработку.\n"
+        "8. Если данных не хватает, скажи, что именно нужно прислать или уточнить.\n\n"
+        f"Специальная инструкция по задаче: {task_rules.get(task, task_rules['general_analysis'])}\n\n"
+        "Формат ответа:\n"
+        "• Короткий вывод\n"
+        "• Главное по файлу\n"
+        "• Риски/ошибки/важные места, если есть\n"
+        "• Что можно сделать дальше\n\n"
+        "Содержимое файла для анализа:\n"
         f"{_limit_text(extracted_text)}"
     )
-
 
 def build_file_status_text(filename: str, stage: str) -> str:
     ext = _extension(filename).upper() or "FILE"
@@ -275,7 +379,7 @@ async def analyze_pdf_images_with_openai(
     if not page_images or not openai_client:
         return ""
 
-    question = question.strip() or "Проанализируй PDF, прочитай видимый текст и выдели главное."
+    question = question.strip() or "Прочитай PDF как документ: извлеки видимый текст, сделай краткое резюме, найди важные пункты, риски и следующие шаги."
     content: list[dict[str, Any]] = [
         {"type": "text", "text": build_pdf_vision_prompt(filename, question)}
     ]
@@ -326,6 +430,7 @@ async def file_router(
     prompt = build_file_analysis_prompt(question, filename, extracted_text)
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": prompt}]
     return await ai_router(selected_model, messages)
+
 
 
 
