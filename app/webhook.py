@@ -1,23 +1,17 @@
-"""Webhook helper notes for VSotahBot.
+"""
+Webhook helper module for VSotahBot.
 
-The real webhook endpoint is registered in app.bot_app so all existing aiogram
-handlers keep working without moving code around.
-
-Railway variables for webhook mode:
-    WEBHOOK_MODE=true
-    WEBHOOK_URL=https://<your-service>.up.railway.app
-    WEBHOOK_SECRET=<random-long-secret>  # optional but recommended
-    WEBHOOK_DROP_PENDING_UPDATES=false
-
-To rollback instantly:
-    WEBHOOK_MODE=false
+The active webhook route is intentionally registered inside app.bot_app.start_web_server()
+so the existing Telegram handlers, voice pipeline, loading animation, referrals,
+payments, and /start behavior stay unchanged.
 """
 
-from __future__ import annotations
-
-import secrets
+import os
 
 
-def generate_webhook_secret() -> str:
-    """Generate a strong Telegram webhook secret token."""
-    return secrets.token_urlsafe(32)
+def webhook_enabled() -> bool:
+    return os.getenv("WEBHOOK_MODE", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def webhook_url() -> str:
+    return os.getenv("WEBHOOK_URL", "").rstrip("/")
