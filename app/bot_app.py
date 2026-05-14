@@ -1248,7 +1248,7 @@ async def animate_thinking(message: Message, base_text: str = "Печатает 
         while True:
             await message.edit_text(states[idx % len(states)])
             idx += 1
-            await asyncio.sleep(0.55)
+            await asyncio.sleep(0.4)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1809,6 +1809,7 @@ async def refstats_handler(message: Message):
     )
 
 
+
 @dp.message(Command("health"))
 async def admin_health_command(message: Message):
     if not is_admin(message.from_user.id):
@@ -1817,15 +1818,48 @@ async def admin_health_command(message: Message):
     started_delta = datetime.utcnow() - STARTED_AT
     uptime_seconds = int(started_delta.total_seconds())
     uptime_text = f"{uptime_seconds // 3600}ч {(uptime_seconds % 3600) // 60}м"
+    runtime_mode = "WEBHOOK" if WEBHOOK_MODE else "POLLING"
 
     db_status = "❌ ERROR"
     db_latency_ms = 0
+    users_total = 0
+    users_24h = 0
+    events_24h = 0
+    ai_events_24h = 0
+    error_events_24h = 0
+    payments_24h = 0
+    latest_errors_text = "Ошибок за последние 24ч не найдено."
     try:
         start = time.perf_counter()
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            users_total = await conn.fetchval("SELECT COUNT(*) FROM users")
+            users_24h = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours'")
+            events_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE created_at >= NOW() - INTERVAL '24 hours'")
+            ai_events_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE created_at >= NOW() - INTERVAL '24 hours' AND event_type IN ('ai_message', 'voice_message', 'file_message', 'image_message')"
+            )
+            error_events_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE created_at >= NOW() - INTERVAL '24 hours' AND (event_type ILIKE '%error%' OR details ILIKE '%error%' OR details ILIKE '%exception%')"
+            )
+            payments_24h = await conn.fetchval("SELECT COUNT(*) FROM payments WHERE created_at >= NOW() - INTERVAL '24 hours'")
+            latest_error_rows = await conn.fetch(
+                """
+                SELECT event_type, details, created_at
+                FROM events
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                  AND (event_type ILIKE '%error%' OR details ILIKE '%error%' OR details ILIKE '%exception%')
+                ORDER BY created_at DESC
+                LIMIT 3
+                """
+            )
         db_latency_ms = round((time.perf_counter() - start) * 1000)
         db_status = "✅ OK"
+        if latest_error_rows:
+            latest_errors_text = "\n".join(
+                f"• {fmt_dt(row['created_at'])} — {row['event_type']}: {short_error_text(row['details'])[:120]}"
+                for row in latest_error_rows
+            )
     except Exception as e:
         db_status = f"❌ {short_error_text(e)[:120]}"
 
@@ -1841,7 +1875,7 @@ async def admin_health_command(message: Message):
     tavily_status = "❌ OFF"
     if TAVILY_API_KEY:
         try:
-            test_results = await search_web("OpenAI latest news")
+            test_results = await search_web("latest technology news")
             tavily_status = "✅ ON / search OK" if test_results else "⚠️ KEY SET / no results"
         except Exception as e:
             tavily_status = f"❌ ERROR: {short_error_text(e)[:90]}"
@@ -1851,21 +1885,33 @@ async def admin_health_command(message: Message):
     redis_status = "✅ OK" if redis_ok else f"⚠️ {redis_details}"
 
     await message.answer(
-        "🩺 VSotahBot Health\n\n"
+        "🩺 VSotahBot Health 3.0\n\n"
+        f"Mode: {runtime_mode}\n"
         f"Bot API: {bot_status}\n"
         f"Bot: {bot_username_text}\n"
         f"PostgreSQL: {db_status}\n"
         f"DB latency: {db_latency_ms} ms\n"
         f"Uptime: {uptime_text}\n\n"
-        f"OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
-        f"Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
-        f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
-        f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
-        f"Live Web / Tavily: {tavily_status}\n"
-        f"Redis cache: {redis_status}\n"
-        f"Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
-        f"Event queue: {queue_size}\n"
-        f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
+        "🔌 Providers:\n"
+        f"• OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
+        f"• Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
+        f"• Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
+        f"• DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
+        f"• Live Web / Tavily: {tavily_status}\n\n"
+        "⚙️ Infrastructure:\n"
+        f"• Redis cache: {redis_status}\n"
+        f"• Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
+        f"• Event queue: {queue_size}\n"
+        f"• Voice replies: {'✅ ON' if VOICE_REPLY_ENABLED else '❌ OFF'}\n"
+        f"• Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}\n\n"
+        "📊 Last 24h:\n"
+        f"• Users total: {users_total}\n"
+        f"• New users: {users_24h}\n"
+        f"• Events: {events_24h}\n"
+        f"• AI events: {ai_events_24h}\n"
+        f"• Payments: {payments_24h}\n"
+        f"• Errors: {error_events_24h}\n\n"
+        f"🧯 Latest errors:\n{latest_errors_text}"
     )
 
 
