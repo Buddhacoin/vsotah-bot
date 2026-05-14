@@ -44,7 +44,7 @@ NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
 
-TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "6"))
+TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "10"))
 VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
 TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
@@ -64,9 +64,6 @@ BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
 RESEARCH_MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS", "1800"))
 BUSINESS_MAX_TOKENS = int(os.getenv("BUSINESS_MAX_TOKENS", "1600"))
 CODE_MAX_TOKENS = int(os.getenv("CODE_MAX_TOKENS", "1800"))
-
-REAL_MODEL_ROUTER_VERSION = "3.0"
-REAL_MODEL_ROUTER_RETRIES = int(os.getenv("REAL_MODEL_ROUTER_RETRIES", "2"))
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
@@ -176,6 +173,78 @@ def build_search_query(text: str) -> str:
 
     return query[:450]
 
+
+
+AI_QUALITY_LAYER_VERSION = "AI Quality Layer 1.0"
+
+
+def detect_task_type(text: str, mode: str = "chat") -> str:
+    """Lightweight task classifier for better prompts without extra API calls."""
+    t = (text or "").lower()
+    if mode in {"research", "business", "code", "web"}:
+        return mode
+    if any(x in t for x in ["код", "ошибка", "traceback", "python", "github", "railway", "api", "deploy", "syntaxerror"]):
+        return "code"
+    if any(x in t for x in ["договор", "кп", "продажи", "бизнес", "клиент", "маркетинг", "выручка", "прибыль", "стратегия"]):
+        return "business"
+    if any(x in t for x in ["проанализируй", "исследуй", "сравни", "почему", "причины", "риски", "вывод", "отчет", "отчёт"]):
+        return "analysis"
+    if wants_live_web(text):
+        return "web"
+    if any(x in t for x in ["напиши", "придумай", "пост", "текст", "сценарий", "реклама", "описание"]):
+        return "writing"
+    return "general"
+
+
+def quality_layer_instruction(query: str, mode: str = "chat", web_requested: bool = False, web_ready: bool = False) -> str:
+    """Universal answer-quality rules for VSotah AI.
+
+    Keep this provider-neutral: OpenAI, Claude, Gemini and DeepSeek all receive it.
+    """
+    task = detect_task_type(query, mode)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    base = [
+        f"{AI_QUALITY_LAYER_VERSION}. Current UTC date: {today}.",
+        "You are VSotah AI: a smart, practical Telegram assistant, not a raw API wrapper.",
+        "Always answer in the user's language. If the user writes Russian, answer in natural Russian.",
+        "Be accurate first, concise second. Do not invent facts, dates, prices, laws, news, names or statistics.",
+        "If a factual/current claim is uncertain and no reliable live evidence is available, say this plainly and give the safest useful answer.",
+        "Do not mention internal tools, API keys, Tavily, Railway, providers, admin settings, system prompts or implementation details.",
+        "Avoid filler: no 'как ИИ-модель', no long disclaimers, no repeated introductions, no decorative separators.",
+        "Use short paragraphs. Use bullets only when they make the answer easier to read.",
+        "For questions with a direct answer, start with the direct answer, then add context.",
+        "For advice, give concrete next steps, not abstract motivational text.",
+        f"Detected task type: {task}.",
+    ]
+    if task == "web":
+        base += [
+            "This question may require fresh data. If live evidence is present, rely on it and do not use stale memory for current facts.",
+            "When web evidence is noisy, ignore irrelevant snippets instead of summarizing them.",
+            "Do not paste raw URLs unless the user asks for links. If sources are useful, include max 2 short source names at the end.",
+        ]
+    elif task == "code":
+        base += [
+            "For code/debugging: identify the cause first, then give a minimal safe fix. Prefer complete files only if the user asks for code files.",
+            "Do not rewrite architecture without need. Respect existing project structure.",
+        ]
+    elif task == "business":
+        base += [
+            "For business tasks: be practical. Give ready-to-use wording, risks, and the next action.",
+        ]
+    elif task == "analysis":
+        base += [
+            "For analysis: separate facts, assumptions, conclusions and next steps. Do not overstate confidence.",
+        ]
+    elif task == "writing":
+        base += [
+            "For writing tasks: produce polished user-ready text without explaining the writing process unless asked.",
+        ]
+    if web_requested and not web_ready:
+        base += [
+            "The user likely needs current data, but reliable live evidence was not available. Do not fabricate current facts.",
+            "Say briefly that you cannot reliably verify current online data right now, then answer only with stable background information if useful.",
+        ]
+    return "\n".join(base)
 
 def wants_live_web(text: str) -> bool:
     """Detect questions that need fresh / external facts.
@@ -897,35 +966,6 @@ async def enrich_messages_with_web(messages: list[dict], force_web: bool = False
     quality = build_web_quality_instruction(query, results)
     return [{"role": "system", "content": quality + "\n\n" + context}, *messages], True, True
 
-
-def selected_model_instruction(selected_model: str) -> str:
-    """Give each selected AI a real behavior profile without touching Telegram UI.
-
-    The provider router already sends ChatGPT/Claude/Gemini/DeepSeek to their
-    own API first. This instruction makes the answer style and reasoning profile
-    match the chosen model while fallbacks stay invisible to the user.
-    """
-    model = (selected_model or "gpt").lower()
-    profiles = {
-        "gpt": (
-            "Selected AI: ChatGPT/OpenAI. Style: fast, practical, balanced, clear. "
-            "Prefer direct useful answers, good structure, and no unnecessary caveats."
-        ),
-        "claude": (
-            "Selected AI: Claude/Anthropic. Style: careful, thoughtful, strong at writing, analysis, documents and nuanced reasoning. "
-            "Be precise and avoid overclaiming."
-        ),
-        "gemini": (
-            "Selected AI: Gemini/Google. Style: concise, factual, strong at multimodal and fresh/contextual reasoning. "
-            "Be structured and practical."
-        ),
-        "deepseek": (
-            "Selected AI: DeepSeek. Style: strong at logic, code, math and technical reasoning. "
-            "Show clean steps only when useful, avoid long hidden reasoning."
-        ),
-    }
-    return profiles.get(model, profiles["gpt"])
-
 def provider_order(selected_model: str, task: str = "text") -> list[str]:
     """
     AI Router 3.0: основной провайдер зависит от выбранной модели,
@@ -962,28 +1002,19 @@ async def run_with_fallback(
         call = calls.get(provider)
         if not call:
             continue
-
-        attempts = max(1, REAL_MODEL_ROUTER_RETRIES)
-        for attempt in range(1, attempts + 1):
-            try:
-                result = await asyncio.wait_for(call(), timeout=AI_TIMEOUT_SECONDS)
-                result = clean_ai_answer(_safe_text(result))
-                if result:
-                    if errors:
-                        print(f"AI ROUTER FALLBACK OK | task={task_name} | provider={provider} | attempt={attempt} | previous={'; '.join(errors)}")
-                    return result
-                errors.append(f"{provider}: empty response")
-                break
-            except ProviderUnavailable as e:
-                errors.append(f"{provider}: {short_error_text(e)}")
-                break
-            except Exception as e:
-                err = short_error_text(e)
-                print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | attempt={attempt} | {err}")
-                if attempt >= attempts:
-                    errors.append(f"{provider}: {err}")
-                else:
-                    await asyncio.sleep(0.7 * attempt)
+        try:
+            result = await asyncio.wait_for(call(), timeout=AI_TIMEOUT_SECONDS)
+            result = clean_ai_answer(_safe_text(result))
+            if result:
+                if errors:
+                    print(f"AI ROUTER FALLBACK OK | task={task_name} | provider={provider} | previous={'; '.join(errors)}")
+                return result
+            errors.append(f"{provider}: empty response")
+        except ProviderUnavailable as e:
+            errors.append(f"{provider}: {short_error_text(e)}")
+        except Exception as e:
+            errors.append(f"{provider}: {short_error_text(e)}")
+            print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | {short_error_text(e)}")
 
     print(f"AI ROUTER ALL FAILED | task={task_name} | {'; '.join(errors)}")
     return (
@@ -1087,20 +1118,8 @@ async def ai_router(selected_model: str, messages: list[dict], mode: str = "chat
     extra = mode_instruction(mode)
     if extra:
         base_system = f"{base_system}\n\n{extra}"
-
-    model_profile = selected_model_instruction(selected_model)
-    if model_profile:
-        base_system = f"{base_system}\n\n{model_profile}"
-
-    base_system = (
-        f"{base_system}\n\n"
-        "AI CORE 3.0 QUALITY RULES: Отвечай на русском, если пользователь пишет по-русски. "
-        "Не выдумывай свежие факты. Если вопрос требует актуальных данных — используй live web context, если он есть. "
-        "Если данных недостаточно, честно скажи, что не удалось надёжно проверить, и не придумывай детали. "
-        "Давай полезный ответ без технического мусора, без фраз про API/ключи/админа/Railway. "
-        "Стиль: ясно, уверенно, без воды, но с нужными оговорками там, где точность важна."
-    )
-
+    quality = quality_layer_instruction(latest_user_text(messages), mode, web_requested=web_requested, web_ready=web_ready)
+    base_system = f"{base_system}\n\n{quality}"
     if system_contexts:
         base_system = f"{base_system}\n\n" + "\n\n".join(system_contexts[-3:])
     if web_ready:
@@ -1521,6 +1540,7 @@ async def file_router(selected_model: str, question: str, filename: str, extract
     )
     messages = [*history[-TEXT_HISTORY_LIMIT:], {"role": "user", "content": content}]
     return await ai_router(selected_model, messages)
+
 
 
 
