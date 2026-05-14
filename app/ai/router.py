@@ -33,15 +33,15 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # Модели можно менять через Railway Variables без правки кода.
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
-ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-3-5-sonnet-latest")
-ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-3-5-sonnet-latest")
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
-DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-chat")
-NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
-GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.1-chat-latest")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.1-chat-latest")
+ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
+ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.1-flash")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.1-flash")
+DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-v4-flash")
+NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "gemini-3-pro-image-preview")
+GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-2")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
 
 TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "10"))
@@ -1463,96 +1463,222 @@ async def enhance_image_edit_prompt(user_prompt: str) -> str:
     return deterministic_prompt[:2000]
 
 
+
+
+# Image Studio 3.0: real provider image pipelines.
+# Nano Banana Pro uses Gemini native image generation/editing.
+# GPT Image uses OpenAI Images generate/edit endpoints.
+def _extract_gemini_inline_image(response: Any) -> tuple[bytes | None, str]:
+    """Extract image bytes and optional text from Gemini generate_content response."""
+    notes: list[str] = []
+    try:
+        for candidate in getattr(response, "candidates", []) or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", []) or []:
+                text_part = getattr(part, "text", None)
+                if text_part:
+                    notes.append(str(text_part).strip())
+                inline_data = getattr(part, "inline_data", None)
+                if inline_data and getattr(inline_data, "data", None):
+                    data = inline_data.data
+                    if isinstance(data, str):
+                        data = base64.b64decode(data)
+                    return data, "\n".join(n for n in notes if n).strip()
+    except Exception as e:
+        print(f"GEMINI IMAGE EXTRACT ERROR: {short_error_text(e)}")
+    return None, "\n".join(n for n in notes if n).strip()
+
+
+def _gemini_image_config() -> Any:
+    try:
+        return types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"])
+    except Exception:
+        return None
+
+
+def _openai_image_model_candidates(primary: str | None = None) -> list[str]:
+    candidates = [primary or GPT_IMAGE_MODEL, "gpt-image-2", "gpt-image-1.5", "gpt-image-1", "chatgpt-image-latest"]
+    result: list[str] = []
+    for model in candidates:
+        model = (model or "").strip()
+        if model and model not in result:
+            result.append(model)
+    return result
+
+
+def _decode_openai_image_item(item: Any) -> bytes | None:
+    value = getattr(item, "b64_json", None)
+    if value:
+        if isinstance(value, str) and value.startswith("data:image"):
+            value = value.split(",", 1)[1]
+        return base64.b64decode(value)
+    return None
+
+
+async def _run_openai_image_generate(prompt: str, size: str) -> tuple[bytes | None, str]:
+    last_error = ""
+    for model in _openai_image_model_candidates():
+        try:
+            kwargs = {
+                "model": model,
+                "prompt": prompt,
+                "size": size,
+                "n": 1,
+            }
+            # Some newer/older GPT Image models accept different quality values.
+            if GPT_IMAGE_QUALITY:
+                kwargs["quality"] = GPT_IMAGE_QUALITY
+            response = await openai_client.images.generate(**kwargs)
+            image_bytes = _decode_openai_image_item(response.data[0])
+            if image_bytes:
+                return image_bytes, image_result_caption("gptimage")
+            last_error = f"{model}: no b64 image"
+        except TypeError:
+            try:
+                response = await openai_client.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size=size,
+                    n=1,
+                )
+                image_bytes = _decode_openai_image_item(response.data[0])
+                if image_bytes:
+                    return image_bytes, image_result_caption("gptimage")
+                last_error = f"{model}: no b64 image"
+            except Exception as e:
+                last_error = f"{model}: {short_error_text(e)}"
+                print(f"OPENAI IMAGE GENERATE FALLBACK ERROR: {last_error}")
+        except Exception as e:
+            last_error = f"{model}: {short_error_text(e)}"
+            print(f"OPENAI IMAGE GENERATE ERROR: {last_error}")
+    print(f"OPENAI IMAGE GENERATE ALL FAILED: {last_error}")
+    return None, "⚠️ GPT Image временно не смог создать изображение. Попробуйте ещё раз чуть позже."
+
+
+async def _run_openai_image_edit(prompt: str, image_bytes: bytes, size: str = "1024x1024") -> tuple[bytes | None, str]:
+    last_error = ""
+    for model in _openai_image_model_candidates():
+        try:
+            image_file = BytesIO(image_bytes)
+            image_file.name = "input.png"
+            response = await openai_client.images.edit(
+                model=model,
+                image=image_file,
+                prompt=prompt,
+                size=size,
+                n=1,
+            )
+            edited_bytes = _decode_openai_image_item(response.data[0])
+            if edited_bytes:
+                return edited_bytes, image_result_caption("gptimage", "edit")
+            last_error = f"{model}: no b64 image"
+        except Exception as e:
+            last_error = f"{model}: {short_error_text(e)}"
+            print(f"OPENAI IMAGE EDIT ERROR: {last_error}")
+    print(f"OPENAI IMAGE EDIT ALL FAILED: {last_error}")
+    return None, "⚠️ GPT Image временно не смог отредактировать изображение. Попробуйте ещё раз чуть позже."
 async def generate_nano_banana_image(prompt: str) -> tuple[bytes | None, str]:
+    """Real Nano Banana Pro generation via Gemini native image model."""
     if not google_client:
-        return None, "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже."
+        return None, "⚠️ Nano Banana Pro пока не подключён."
 
-    enhanced_prompt = await enhance_image_prompt(prompt, "Nano Banana / Gemini Image")
+    enhanced_prompt = await enhance_image_prompt(prompt, "Nano Banana Pro / Gemini native image")
 
-    def run_image_generation() -> tuple[bytes | None, str]:
-        response = google_client.models.generate_images(
-            model=NANO_BANANA_MODEL,
-            prompt=enhanced_prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio=infer_gemini_aspect_ratio(prompt),
-                person_generation="allow_adult",
-            ),
-        )
-
-        if not response.generated_images:
-            return None, "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже."
-
-        image_obj = response.generated_images[0].image
-
-        if hasattr(image_obj, "image_bytes") and image_obj.image_bytes:
-            return image_obj.image_bytes, image_result_caption("nanobanana")
-
-        buffer = BytesIO()
-        image_obj.save(buffer, format="PNG")
-        return buffer.getvalue(), image_result_caption("nanobanana")
+    def run_native_generation() -> tuple[bytes | None, str]:
+        config = _gemini_image_config()
+        kwargs: dict[str, Any] = {
+            "model": NANO_BANANA_MODEL,
+            "contents": [enhanced_prompt],
+        }
+        if config is not None:
+            kwargs["config"] = config
+        response = google_client.models.generate_content(**kwargs)
+        image_bytes, note = _extract_gemini_inline_image(response)
+        if image_bytes:
+            return image_bytes, image_result_caption("nanobanana")
+        return None, note or "Nano Banana Pro не вернул изображение."
 
     try:
-        return await asyncio.to_thread(run_image_generation)
+        image_bytes, note = await asyncio.to_thread(run_native_generation)
+        if image_bytes:
+            return image_bytes, note
     except Exception as e:
-        print(f"NANO BANANA IMAGE ERROR: {short_error_text(e)}")
-        return None, "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже."
+        print(f"NANO BANANA NATIVE IMAGE ERROR: {short_error_text(e)}")
+
+    # Compatibility fallback for older Google image endpoints if the account does not yet
+    # expose Nano Banana Pro through generate_content.
+    try:
+        def run_imagen_fallback() -> tuple[bytes | None, str]:
+            response = google_client.models.generate_images(
+                model=os.getenv("GEMINI_IMAGE_FALLBACK_MODEL", "imagen-4.0-generate-001"),
+                prompt=enhanced_prompt,
+                config=types.GenerateImagesConfig(
+                    number_of_images=1,
+                    aspect_ratio=infer_gemini_aspect_ratio(prompt),
+                    person_generation="allow_adult",
+                ),
+            )
+            if not response.generated_images:
+                return None, "⚠️ Nano Banana Pro временно не вернул изображение."
+            image_obj = response.generated_images[0].image
+            if hasattr(image_obj, "image_bytes") and image_obj.image_bytes:
+                return image_obj.image_bytes, image_result_caption("nanobanana")
+            buffer = BytesIO()
+            image_obj.save(buffer, format="PNG")
+            return buffer.getvalue(), image_result_caption("nanobanana")
+        return await asyncio.to_thread(run_imagen_fallback)
+    except Exception as e:
+        print(f"NANO BANANA FALLBACK IMAGE ERROR: {short_error_text(e)}")
+        return None, "⚠️ Nano Banana Pro временно недоступен. Попробуйте ещё раз чуть позже."
 
 
-async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
-    if not openai_client:
-        return None, "⚠️ Sora GPT Image пока не подключён. Администратору нужно добавить OPENAI_API_KEY в Railway."
-
-    def normalize_b64(value: str) -> bytes:
-        if value.startswith("data:image"):
-            value = value.split(",", 1)[1]
-        return base64.b64decode(value)
-
-    enhanced_prompt = await enhance_image_prompt(prompt, "Sora GPT Image / OpenAI Image")
-
-    response = await openai_client.images.generate(
-        model=GPT_IMAGE_MODEL,
-        prompt=enhanced_prompt,
-        size=infer_openai_image_size(prompt),
-        quality=GPT_IMAGE_QUALITY,
-        n=1,
-    )
-
-    item = response.data[0]
-    if getattr(item, "b64_json", None):
-        return normalize_b64(item.b64_json), image_result_caption("gptimage")
-
-    return None, "⚠️ Sora GPT Image не вернул изображение. Попробуйте другой запрос."
-
-
-async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None, str]:
-    if not openai_client:
-        return None, "⚠️ Редактирование изображений пока не подключено. Администратору нужно добавить OPENAI_API_KEY в Railway."
-
-    def normalize_b64(value: str) -> bytes:
-        if value.startswith("data:image"):
-            value = value.split(",", 1)[1]
-        return base64.b64decode(value)
+async def edit_nano_banana_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None, str]:
+    """Real Nano Banana Pro image-to-image editing."""
+    if not google_client:
+        return None, "⚠️ Nano Banana Pro пока не подключён."
 
     enhanced_prompt = await enhance_image_edit_prompt(prompt)
 
-    image_file = BytesIO(image_bytes)
-    image_file.name = "input.png"
+    def run_native_edit() -> tuple[bytes | None, str]:
+        config = _gemini_image_config()
+        kwargs: dict[str, Any] = {
+            "model": NANO_BANANA_MODEL,
+            "contents": [
+                enhanced_prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            ],
+        }
+        if config is not None:
+            kwargs["config"] = config
+        response = google_client.models.generate_content(**kwargs)
+        edited_bytes, note = _extract_gemini_inline_image(response)
+        if edited_bytes:
+            return edited_bytes, image_result_caption("nanobanana", "edit")
+        return None, note or "Nano Banana Pro не вернул изображение."
 
-    # В текущей версии OpenAI Images API метод edit не принимает quality.
-    response = await openai_client.images.edit(
-        model=GPT_IMAGE_MODEL,
-        image=image_file,
-        prompt=enhanced_prompt,
-        size="1024x1024",
-        n=1,
-    )
+    try:
+        return await asyncio.to_thread(run_native_edit)
+    except Exception as e:
+        print(f"NANO BANANA IMAGE EDIT ERROR: {short_error_text(e)}")
+        return None, "⚠️ Nano Banana Pro временно не смог отредактировать изображение. Попробуйте ещё раз чуть позже."
 
-    item = response.data[0]
-    if getattr(item, "b64_json", None):
-        return normalize_b64(item.b64_json), image_result_caption("gptimage", "edit")
 
-    return None, "⚠️ Редактирование изображения не вернуло результат. Попробуйте другой запрос."
+async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
+    """Real OpenAI GPT Image generation. Uses the configured latest GPT Image model first."""
+    if not openai_client:
+        return None, "⚠️ GPT Image пока не подключён."
+
+    enhanced_prompt = await enhance_image_prompt(prompt, "GPT Image / OpenAI")
+    return await _run_openai_image_generate(enhanced_prompt, infer_openai_image_size(prompt))
+
+
+async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None, str]:
+    """Real OpenAI GPT Image image-to-image editing."""
+    if not openai_client:
+        return None, "⚠️ GPT Image пока не подключён."
+
+    enhanced_prompt = await enhance_image_edit_prompt(prompt)
+    return await _run_openai_image_edit(enhanced_prompt, image_bytes, size="1024x1024")
 
 
 def render_pdf_pages_to_images(file_bytes: bytes, max_pages: int = 3) -> list[bytes]:
