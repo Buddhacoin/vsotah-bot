@@ -1,12 +1,8 @@
 import asyncio
 import base64
 import os
-import re
-from datetime import datetime
 from io import BytesIO
 from typing import Any, Callable, Coroutine
-
-import httpx
 
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
@@ -42,8 +38,6 @@ DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-chat")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-LIVE_WEB_TIMEOUT = float(os.getenv("LIVE_WEB_TIMEOUT", "12"))
 
 TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "6"))
 VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
@@ -61,238 +55,6 @@ deepseek_client = (
     if DEEPSEEK_API_KEY
     else None
 )
-
-
-# ---------------- AI CORE 3.0: live-data + quality layer ----------------
-LIVE_WEB_KEYWORDS = (
-    "сейчас", "сегодня", "последн", "актуальн", "новост", "курс", "цена", "стоимость",
-    "погода", "прогноз", "расписание", "результат", "кто выиграл", "где находится",
-    "куда летал", "что произошло", "что случилось", "2025", "2026",
-)
-
-WEATHER_KEYWORDS = ("погода", "прогноз", "температура", "осадки", "ветер")
-CRYPTO_KEYWORDS = ("биткоин", "bitcoin", "btc", "эфир", "ethereum", "eth", "крипт", "coin")
-
-
-def latest_user_text(messages: list[dict]) -> str:
-    for msg in reversed(messages or []):
-        if msg.get("role") == "user" and msg.get("content"):
-            return str(msg["content"]).strip()
-    return ""
-
-
-def needs_live_web(question: str) -> bool:
-    q = (question or "").lower()
-    if not q:
-        return False
-    if any(k in q for k in LIVE_WEB_KEYWORDS):
-        return True
-    # Даты/относительные формулировки часто требуют свежих данных.
-    if re.search(r"\b(20\d{2}|май|июн|июл|август|сентябр|октябр|ноябр|декабр|январ|феврал|март|апрел)\b", q):
-        return True
-    return False
-
-
-def is_weather_query(question: str) -> bool:
-    q = (question or "").lower()
-    return any(k in q for k in WEATHER_KEYWORDS)
-
-
-def is_crypto_query(question: str) -> bool:
-    q = (question or "").lower()
-    return any(k in q for k in CRYPTO_KEYWORDS)
-
-
-def guess_weather_location(question: str) -> str:
-    text = question or ""
-    # Берём всё после популярных предлогов, но без лишней пунктуации.
-    patterns = [
-        r"погод[ауы]?\s+(?:сейчас\s+)?(?:в|во|на)\s+(.+)",
-        r"температур[аы]?\s+(?:сейчас\s+)?(?:в|во|на)\s+(.+)",
-        r"прогноз\s+(?:погоды\s+)?(?:в|во|на)\s+(.+)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if m:
-            loc = m.group(1)
-            loc = re.sub(r"[?.!,]+$", "", loc).strip()
-            loc = re.sub(r"\s+", " ", loc)
-            return loc[:120]
-    return text.strip()[:120]
-
-
-async def fetch_json(url: str, params: dict | None = None, headers: dict | None = None, timeout: float = LIVE_WEB_TIMEOUT) -> dict:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        response = await client.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        return response.json()
-
-
-async def get_live_weather_answer(question: str) -> str:
-    location = guess_weather_location(question)
-    if not location:
-        return ""
-    try:
-        geo = await fetch_json(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": location, "count": 1, "language": "ru", "format": "json"},
-        )
-        results = geo.get("results") or []
-        if not results:
-            return ""
-        place = results[0]
-        lat, lon = place.get("latitude"), place.get("longitude")
-        name = place.get("name") or location
-        admin1 = place.get("admin1") or ""
-        country = place.get("country") or ""
-        weather = await fetch_json(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-                "timezone": "auto",
-                "forecast_days": 1,
-            },
-        )
-        cur = weather.get("current") or {}
-        daily = (weather.get("daily") or {})
-        max_t = (daily.get("temperature_2m_max") or [None])[0]
-        min_t = (daily.get("temperature_2m_min") or [None])[0]
-        rain = (daily.get("precipitation_probability_max") or [None])[0]
-        parts = []
-        place_line = ", ".join([x for x in [name, admin1, country] if x])
-        parts.append(f"Сейчас в {place_line}:")
-        if cur.get("temperature_2m") is not None:
-            parts.append(f"температура {round(cur['temperature_2m'])}°C")
-        if cur.get("apparent_temperature") is not None:
-            parts.append(f"ощущается как {round(cur['apparent_temperature'])}°C")
-        if cur.get("wind_speed_10m") is not None:
-            parts.append(f"ветер {round(cur['wind_speed_10m'])} км/ч")
-        if cur.get("relative_humidity_2m") is not None:
-            parts.append(f"влажность {round(cur['relative_humidity_2m'])}%")
-        answer = "; ".join(parts) + "."
-        if max_t is not None or min_t is not None or rain is not None:
-            answer += "\n\nНа сегодня: "
-            day_bits = []
-            if max_t is not None:
-                day_bits.append(f"днём до {round(max_t)}°C")
-            if min_t is not None:
-                day_bits.append(f"минимум около {round(min_t)}°C")
-            if rain is not None:
-                day_bits.append(f"вероятность осадков до {round(rain)}%")
-            answer += "; ".join(day_bits) + "."
-        return answer
-    except Exception as e:
-        print(f"LIVE WEATHER ERROR: {short_error_text(e)}")
-        return ""
-
-
-async def get_crypto_answer(question: str) -> str:
-    q = (question or "").lower()
-    coin_id = "bitcoin"
-    coin_name = "Bitcoin"
-    if "эфир" in q or "ethereum" in q or re.search(r"\beth\b", q):
-        coin_id = "ethereum"
-        coin_name = "Ethereum"
-    try:
-        data = await fetch_json(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": coin_id, "vs_currencies": "usd,rub,eur", "include_24hr_change": "true"},
-        )
-        item = data.get(coin_id) or {}
-        usd = item.get("usd")
-        rub = item.get("rub")
-        eur = item.get("eur")
-        change = item.get("usd_24h_change")
-        if usd is None:
-            return ""
-        def money(v, symbol):
-            if v is None:
-                return None
-            return f"{symbol}{v:,.0f}" if symbol != "₽" else f"{v:,.0f} ₽".replace(",", " ")
-        lines = [f"Сейчас {coin_name}: {money(usd, '$')} / {money(rub, '₽')} / {money(eur, '€')}."]
-        if change is not None:
-            sign = "+" if change >= 0 else ""
-            lines.append(f"Изменение за 24 часа: {sign}{change:.2f}%.")
-        lines.append("Цена быстро меняется, источник: CoinGecko.")
-        return "\n".join(lines)
-    except Exception as e:
-        print(f"CRYPTO LIVE ERROR: {short_error_text(e)}")
-        return ""
-
-
-def build_search_query(question: str) -> str:
-    q = (question or "").strip()
-    q = re.sub(r"\s+", " ", q)
-    # Подсказываем поиску, что нужен русский ответ, но не ломаем исходный вопрос.
-    if re.search(r"[а-яА-ЯёЁ]", q):
-        return f"{q} актуально сегодня"
-    return q
-
-
-async def tavily_search(question: str) -> list[dict]:
-    if not TAVILY_API_KEY:
-        return []
-    payload = {
-        "api_key": TAVILY_API_KEY,
-        "query": build_search_query(question),
-        "search_depth": "advanced",
-        "include_answer": False,
-        "include_raw_content": False,
-        "max_results": 5,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=LIVE_WEB_TIMEOUT) as client:
-            response = await client.post("https://api.tavily.com/search", json=payload)
-            response.raise_for_status()
-            data = response.json()
-        results = []
-        for item in data.get("results") or []:
-            title = _safe_text(item.get("title"))[:160]
-            url = _safe_text(item.get("url"))[:300]
-            content = _safe_text(item.get("content"))[:900]
-            if title and content:
-                results.append({"title": title, "url": url, "content": content})
-        return results
-    except Exception as e:
-        print(f"TAVILY SEARCH ERROR: {short_error_text(e)}")
-        return []
-
-
-def format_web_context(results: list[dict]) -> str:
-    if not results:
-        return ""
-    lines = []
-    for i, item in enumerate(results[:5], start=1):
-        lines.append(
-            f"Источник {i}: {item.get('title')}\n"
-            f"URL: {item.get('url')}\n"
-            f"Фрагмент: {item.get('content')}"
-        )
-    return "\n\n".join(lines)
-
-
-def build_quality_system_prompt(selected_model: str, web_context: str = "") -> str:
-    base = system_prompt(get_personality(selected_model))
-    quality = (
-        "\n\nAI CORE 3.0 правила качества:\n"
-        "1. Отвечай на русском, если пользователь пишет по-русски.\n"
-        "2. Не выдумывай факты. Если свежих или надёжных данных нет — честно скажи, что не удалось надёжно проверить.\n"
-        "3. Не упоминай API, ключи, Tavily, Railway, админа, системные настройки.\n"
-        "4. Не вставляй длинные списки ссылок. Если источники нужны — максимум 2 коротких строки в конце.\n"
-        "5. Сначала дай прямой ответ, потом краткое пояснение.\n"
-        "6. Не пиши 'если нужно, дай знать' в каждом ответе.\n"
-        "7. Для актуальных вопросов опирайся только на предоставленный web-context.\n"
-    )
-    if web_context:
-        quality += (
-            "\nWeb-context для ответа ниже. Используй его как источники, но не копируй сырой текст. "
-            "Если источники не отвечают на вопрос, скажи, что не удалось надёжно проверить.\n\n"
-            f"{web_context}"
-        )
-    return base + quality
 
 
 class ProviderUnavailable(Exception):
@@ -351,10 +113,25 @@ def messages_to_plain_text(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def provider_status_report() -> str:
+    """Human-readable status for admin /health. Does not call paid APIs."""
+    rows = [
+        f"• OpenAI: {'✅ ON' if OPENAI_API_KEY else '⚠️ OFF'} — {OPENAI_TEXT_MODEL}",
+        f"• Claude: {'✅ ON' if ANTHROPIC_API_KEY else '⚠️ OFF'} — {ANTHROPIC_TEXT_MODEL}",
+        f"• Gemini: {'✅ ON' if GOOGLE_API_KEY else '⚠️ OFF'} — {GEMINI_TEXT_MODEL}",
+        f"• DeepSeek: {'✅ ON' if DEEPSEEK_API_KEY else '⚠️ OFF'} — {DEEPSEEK_TEXT_MODEL}",
+    ]
+    return "\n".join(rows)
+
+
 def provider_order(selected_model: str, task: str = "text") -> list[str]:
     """
-    AI Router 3.0: основной провайдер зависит от выбранной модели,
-    дальше идут fallback-провайдеры, если API временно недоступен.
+    Real Model Router 2.0:
+    - ChatGPT -> OpenAI first
+    - Claude -> Anthropic first
+    - Gemini -> Google first
+    - DeepSeek -> DeepSeek first
+    - then automatic fallback if provider is unavailable
     """
     selected_model = (selected_model or "gpt").lower()
 
@@ -476,32 +253,14 @@ async def gemini_chat(system_text: str, messages: list[dict], model: str) -> str
 
 async def ai_router(selected_model: str, messages: list[dict]) -> str:
     memory = build_memory(messages, limit=TEXT_HISTORY_LIMIT)
-    question = latest_user_text(memory)
-
-    # Fast reliable live-data paths for common current-data tasks.
-    if is_weather_query(question):
-        weather_answer = await get_live_weather_answer(question)
-        if weather_answer:
-            return clean_ai_answer(weather_answer)
-
-    if is_crypto_query(question):
-        crypto_answer = await get_crypto_answer(question)
-        if crypto_answer:
-            return clean_ai_answer(crypto_answer)
-
-    web_context = ""
-    if needs_live_web(question):
-        results = await tavily_search(question)
-        web_context = format_web_context(results)
-
-    system_text = build_quality_system_prompt(selected_model, web_context)
+    system_text = system_prompt(get_personality(selected_model))
     openai_messages = normalize_openai_messages([{"role": "system", "content": system_text}, *memory])
 
     calls = {
-        "openai": lambda: openai_chat(openai_messages, OPENAI_TEXT_MODEL, TEXT_MAX_TOKENS, 0.35),
-        "anthropic": lambda: anthropic_chat(system_text, memory, ANTHROPIC_TEXT_MODEL, TEXT_MAX_TOKENS, 0.35),
+        "openai": lambda: openai_chat(openai_messages, OPENAI_TEXT_MODEL, TEXT_MAX_TOKENS, 0.45),
+        "anthropic": lambda: anthropic_chat(system_text, memory, ANTHROPIC_TEXT_MODEL, TEXT_MAX_TOKENS, 0.45),
         "gemini": lambda: gemini_chat(system_text, memory, GEMINI_TEXT_MODEL),
-        "deepseek": lambda: deepseek_chat(openai_messages, TEXT_MAX_TOKENS, 0.35),
+        "deepseek": lambda: deepseek_chat(openai_messages, TEXT_MAX_TOKENS, 0.45),
     }
     return await run_with_fallback(provider_order(selected_model, "text"), calls, f"text:{selected_model}")
 
