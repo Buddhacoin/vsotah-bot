@@ -15,7 +15,7 @@ def system_prompt(personality: str = "") -> str:
         "Лучший формат: короткие абзацы, понятные пункты только когда они реально нужны. "
         "Если пользователь просит сравнение — сравни обычным текстом, без таблицы. "
         "Если пользователь отправил изображение, внимательно проанализируй его и ответь по вопросу. "
-        "Не повторяй одно и то же. Не растягивай ответ без необходимости. "
+        "Не повторяй одно и то же. Не растягивай ответ без необходимости. Давай прямой ответ с первой строки. Если вопрос требует актуальных данных, не придумывай их без проверки. Не пиши технические фразы про API, ключи, админа или настройки. "
         f"Текущая дата и время: {current_datetime}. Сегодня: {today_text}."
     )
 
@@ -51,5 +51,10 @@ def clean_ai_answer(text: str) -> str:
     cleaned = "\n".join(new_lines)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    banned = ["добавьте api key", "api key", "администратор", "railway", "tavily"]
+    lower = cleaned.lower()
+    if any(b in lower for b in banned):
+        cleaned = re.sub(r".*(?:API key|api key|Tavily|Railway|администратор).*\n?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"Если нужн[оы].*дай знать!?$", "", cleaned, flags=re.IGNORECASE).strip()
     return cleaned.strip()
 
