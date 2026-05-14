@@ -90,11 +90,16 @@ FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
 VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
 
-PORT = int(os.getenv("PORT", "8080"))
+# Webhook is optional. Polling stays the default safe mode.
 WEBHOOK_MODE = os.getenv("WEBHOOK_MODE", "false").lower() in {"1", "true", "yes", "on"}
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram-webhook")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+if not WEBHOOK_PATH.startswith("/"):
+    WEBHOOK_PATH = "/" + WEBHOOK_PATH
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
+WEBHOOK_DROP_PENDING_UPDATES = os.getenv("WEBHOOK_DROP_PENDING_UPDATES", "false").lower() in {"1", "true", "yes", "on"}
+
+PORT = int(os.getenv("PORT", "8080"))
 STARTED_AT = datetime.utcnow()
 
 ADMIN_IDS = {
@@ -2624,30 +2629,14 @@ async def chat_handler(message: Message):
 
 
 async def health_handler(request):
-    return web.json_response({
-        "ok": True,
-        "service": "vsotah-bot",
-        "mode": "webhook" if WEBHOOK_MODE else "polling",
-        "webhook_path": WEBHOOK_PATH if WEBHOOK_MODE else None,
-    })
-
-
-async def telegram_webhook_handler(request):
-    if WEBHOOK_SECRET:
-        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if received_secret != WEBHOOK_SECRET:
-            return web.json_response({"ok": False, "error": "forbidden"}, status=403)
-
-    try:
-        data = await request.json()
-        update = Update.model_validate(data, context={"bot": bot})
-        await dp.feed_update(bot, update)
-    except Exception as e:
-        print(f"TELEGRAM WEBHOOK ERROR: {e}")
-        print(traceback.format_exc())
-        return web.json_response({"ok": False}, status=500)
-
-    return web.json_response({"ok": True})
+    return web.json_response(
+        {
+            "ok": True,
+            "service": "vsotah-bot",
+            "mode": "webhook" if WEBHOOK_MODE else "polling",
+            "webhook_path": WEBHOOK_PATH if WEBHOOK_MODE else None,
+        }
+    )
 
 
 async def tribute_webhook_handler(request):
@@ -2660,14 +2649,40 @@ async def tribute_webhook_handler(request):
     return web.json_response({"ok": True})
 
 
-async def start_web_server():
+async def telegram_webhook_handler(request):
+    """Receive Telegram updates in webhook mode and pass them to the existing Dispatcher.
+
+    This intentionally reuses the same dp/bot handlers as polling mode, so /start,
+    voice, menu, payments, referrals and AI logic are not duplicated or rewritten.
+    """
+    if WEBHOOK_SECRET_TOKEN:
+        header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if header_secret != WEBHOOK_SECRET_TOKEN:
+            return web.json_response({"ok": False, "error": "forbidden"}, status=403)
+
+    try:
+        data = await request.json()
+        update = Update.model_validate(data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        print(f"TELEGRAM WEBHOOK ERROR: {short_error_text(e)}")
+        print(traceback.format_exc())
+        # Telegram retries non-200 responses. Return ok to avoid endless retries
+        # when a single update fails inside a handler.
+        return web.json_response({"ok": True, "handled": False})
+
+    return web.json_response({"ok": True})
+
+
+async def start_web_server(enable_telegram_webhook: bool = False):
     app = web.Application()
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_post("/tribute-webhook", tribute_webhook_handler)
 
-    if WEBHOOK_MODE:
+    if enable_telegram_webhook:
         app.router.add_post(WEBHOOK_PATH, telegram_webhook_handler)
+        print(f"TELEGRAM WEBHOOK ROUTE READY: {WEBHOOK_PATH}")
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -2677,18 +2692,26 @@ async def start_web_server():
     return runner
 
 
-async def setup_webhook():
+async def setup_telegram_webhook():
     if not WEBHOOK_URL:
-        raise RuntimeError("WEBHOOK_URL is missing while WEBHOOK_MODE=true")
+        raise RuntimeError("WEBHOOK_MODE=true, but WEBHOOK_URL is missing")
 
-    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(
-        webhook_url,
-        drop_pending_updates=False,
-        secret_token=WEBHOOK_SECRET or None,
-        allowed_updates=dp.resolve_used_update_types(),
-    )
-    print(f"WEBHOOK SET: {webhook_url}")
+    webhook_endpoint = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    allowed_updates = dp.resolve_used_update_types()
+    kwargs = {
+        "url": webhook_endpoint,
+        "drop_pending_updates": WEBHOOK_DROP_PENDING_UPDATES,
+        "allowed_updates": allowed_updates,
+    }
+    if WEBHOOK_SECRET_TOKEN:
+        kwargs["secret_token"] = WEBHOOK_SECRET_TOKEN
+
+    await bot.set_webhook(**kwargs)
+    print(f"WEBHOOK SET: {webhook_endpoint}")
+
+
+async def run_forever():
+    await asyncio.Event().wait()
 
 
 async def main():
@@ -2706,27 +2729,22 @@ async def main():
     await init_db()
     await start_event_worker(db_pool)
     await setup_bot_info()
-    await start_web_server()
-
-    print("DATABASE CONNECTED")
-    print("BOT STARTED")
 
     if WEBHOOK_MODE:
-        await setup_webhook()
+        await start_web_server(enable_telegram_webhook=True)
+        await setup_telegram_webhook()
+        print("DATABASE CONNECTED")
+        print("BOT STARTED")
         print("BOT RUNNING IN WEBHOOK MODE")
-        await asyncio.Event().wait()
+        await run_forever()
     else:
         await bot.delete_webhook(drop_pending_updates=True)
+        await start_web_server(enable_telegram_webhook=False)
+        print("DATABASE CONNECTED")
+        print("BOT STARTED")
         print("BOT RUNNING IN POLLING MODE")
         await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
