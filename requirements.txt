@@ -12,4 +12,4 @@ pdfplumber
 PyMuPDF
 python-docx
 openpyxl
-aiohttp
+aiohttp==3.10.10
