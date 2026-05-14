@@ -18,23 +18,13 @@ from aiogram.types import (
     PreCheckoutQuery,
     LabeledPrice,
     BotCommand,
-    BotCommandScopeDefault,
-    BotCommandScopeAllPrivateChats,
-    BotCommandScopeAllGroupChats,
-    BotCommandScopeAllChatAdministrators,
-    BotCommandScopeChat,
     LinkPreviewOptions,
     BufferedInputFile,
+    Update,
 )
 
 from app.ai.router import (
     ai_router,
-    research_router,
-    business_router,
-    code_router,
-    web_router,
-    web_is_configured,
-    search_web,
     vision_router,
     generate_nano_banana_image,
     generate_gpt_image,
@@ -48,16 +38,6 @@ from app.ai.file_router import (
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
 from app.referrals import build_referral_link, parse_referral_code, build_invite_text, build_telegram_share_url
-from app.performance import (
-    init_performance_layer,
-    cache_get,
-    cache_set,
-    cache_delete,
-    redis_health,
-    start_event_worker,
-    enqueue_event,
-    event_queue_size,
-)
     
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -65,7 +45,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini")
@@ -86,11 +65,19 @@ AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
 MAX_VOICE_SIZE = int(os.getenv("MAX_VOICE_SIZE", str(20 * 1024 * 1024)))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
-VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
 
 PORT = int(os.getenv("PORT", "8080"))
-STARTED_AT = datetime.utcnow()
+
+# Webhook / polling mode.
+# Keep WEBHOOK_MODE=false for the current safe polling behavior.
+# Set WEBHOOK_MODE=true and WEBHOOK_URL=https://<your-railway-domain> to enable webhook.
+WEBHOOK_MODE = os.getenv("WEBHOOK_MODE", "false").lower() in {"1", "true", "yes", "on"}
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", f"/telegram-webhook/{BOT_TOKEN[:12] if BOT_TOKEN else 'bot'}")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBHOOK_DROP_PENDING_UPDATES = os.getenv("WEBHOOK_DROP_PENDING_UPDATES", "false").lower() in {"1", "true", "yes", "on"}
 
 ADMIN_IDS = {
     int(x.strip())
@@ -514,17 +501,7 @@ async def init_db():
 
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
-    """Fast event logging.
-
-    In production this writes through a background queue so user-facing handlers do
-    not wait for PostgreSQL on every click/message. If the queue is not started
-    or is full, we fall back to the old direct DB insert.
-    """
     try:
-        queued = await enqueue_event(telegram_id, event_type, details[:1000])
-        if queued:
-            return
-
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO events (telegram_id, event_type, details) VALUES ($1, $2, $3)",
@@ -861,65 +838,15 @@ async def build_referral_leaderboard_text() -> str:
     )
 
 async def setup_bot_info():
-    # /start handler remains active, but /start must NOT be shown in Telegram's command menu.
-    # Telegram clients cache commands aggressively, so we clear and set several scopes/languages.
-    commands = [
+    await bot.set_my_commands([
+        BotCommand(command="start", description="👋 Что умеет бот"),
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
-    ]
-
-    scopes_to_clear = [
-        BotCommandScopeDefault(),
-        BotCommandScopeAllPrivateChats(),
-        BotCommandScopeAllGroupChats(),
-        BotCommandScopeAllChatAdministrators(),
-    ]
-    language_codes = [None, "ru", "en"]
-
-    for scope in scopes_to_clear:
-        for language_code in language_codes:
-            try:
-                kwargs = {"scope": scope}
-                if language_code:
-                    kwargs["language_code"] = language_code
-                await bot.delete_my_commands(**kwargs)
-            except Exception as e:
-                print(f"DELETE COMMANDS WARNING: {short_error_text(e)}")
-
-    for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats()]:
-        for language_code in language_codes:
-            try:
-                kwargs = {"scope": scope}
-                if language_code:
-                    kwargs["language_code"] = language_code
-                await bot.set_my_commands(commands, **kwargs)
-            except Exception as e:
-                print(f"SET COMMANDS WARNING: {short_error_text(e)}")
-
-
-
-async def clear_start_for_chat(chat_id: int):
-    """Telegram clients cache command menus. Set a chat-specific command list
-    without /start so the annoying /start suggestion disappears after the user
-    opens the bot. The /start handler itself continues to work.
-    """
-    commands = [
-        BotCommand(command="account", description="👤 Мой профиль"),
-        BotCommand(command="premium", description="💳 Купить подписку"),
-        BotCommand(command="models", description="🤖 Выбрать AI"),
-        BotCommand(command="referral", description="💰 Заработать"),
-        BotCommand(command="channels", description="🧠 Наши каналы"),
-        BotCommand(command="deletecontext", description="💬 Удалить контекст"),
-    ]
-    try:
-        await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=chat_id))
-        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
-    except Exception as e:
-        print(f"CHAT COMMANDS WARNING: {short_error_text(e)}")
+    ])
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -1067,15 +994,9 @@ async def save_message(telegram_id, role, content):
             role,
             content[:12000],
         )
-    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
 
 
 async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
-    cache_key = f"history:{telegram_id}:{limit}"
-    cached_history = await cache_get(cache_key)
-    if cached_history is not None:
-        return cached_history
-
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
@@ -1089,15 +1010,12 @@ async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
     for row in reversed(rows):
         if row["role"] in {"user", "assistant", "system"}:
             history.append({"role": row["role"], "content": row["content"]})
-
-    await cache_set(cache_key, history, ttl_seconds=20)
     return history
 
 
 async def clear_chat(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE telegram_id=$1", telegram_id)
-    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
     await log_event(telegram_id, "delete_context")
 
 
@@ -1227,41 +1145,6 @@ async def send_ai_error_to_admin(error_text: str):
             pass
 
 
-async def animate_thinking(message: Message, base_text: str = "Печатает ответ"):
-    """Small Telegram-safe loading animation.
-    Telegram cannot do real particle dispersion inside a bubble, so we imitate it
-    with live dots and then quietly remove the loading bubble before final answer.
-    """
-    states = [f"{base_text}.", f"{base_text}..", f"{base_text}..."]
-    idx = 0
-    try:
-        while True:
-            await message.edit_text(states[idx % len(states)])
-            idx += 1
-            await asyncio.sleep(0.55)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return
-
-
-async def finish_loading_message(wait_message: Message):
-    # Имитация мягкого исчезновения: коротко убираем точки и удаляем loading.
-    try:
-        await wait_message.edit_text("...")
-        await asyncio.sleep(0.15)
-        await wait_message.edit_text("..")
-        await asyncio.sleep(0.12)
-        await wait_message.edit_text(".")
-        await asyncio.sleep(0.08)
-        await wait_message.delete()
-    except Exception:
-        try:
-            await wait_message.delete()
-        except Exception:
-            pass
-
-
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
     try:
         await callback.message.edit_text(
@@ -1281,11 +1164,6 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=Non
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
-    # ВАЖНО: не удаляем сообщение /start.
-    # На некоторых клиентах Telegram это вызывает огромную синюю кнопку «Старт»,
-    # которая перекрывает поле ввода. Командное меню чистим отдельно.
-    await clear_start_for_chat(message.chat.id)
-
     now = time.time()
     last = recent_starts.get(message.from_user.id, 0)
     if now - last < 2:
@@ -1614,28 +1492,11 @@ async def admin_handler(message: Message):
         "/users — последние пользователи\n"
         "/payments — платежи\n"
         "/refstats — партнёрка\n"
-        "/health — статус сервиса\n"
-        "/errors — ошибки и лимиты\n"
         "/setplus telegram_id\n"
         "/setpro telegram_id\n"
         "/setvip telegram_id\n"
         "/setfree telegram_id"
     )
-
-
-def percent(part: int | float | None, total: int | float | None) -> str:
-    if not total:
-        return "0%"
-    return f"{(float(part or 0) / float(total) * 100):.1f}%"
-
-
-def fmt_dt(value) -> str:
-    if not value:
-        return "—"
-    try:
-        return value.strftime("%d.%m %H:%M")
-    except Exception:
-        return str(value)
 
 
 @dp.message(Command("stats"))
@@ -1677,17 +1538,9 @@ async def stats_handler(message: Message):
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
         payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
         total_stars = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments")
-        payments_today = await conn.fetchval("SELECT COUNT(*) FROM payments WHERE created_at::date = CURRENT_DATE")
-        stars_today = await conn.fetchval("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE created_at::date = CURRENT_DATE")
         referral_invites = await conn.fetchval("SELECT COUNT(*) FROM referrals")
-        referral_invites_today = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE created_at::date = CURRENT_DATE")
         referral_paid = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE status='paid'")
         referral_rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards")
-        errors_today = await conn.fetchval("""
-            SELECT COUNT(*) FROM events
-            WHERE created_at::date = CURRENT_DATE
-              AND (event_type ILIKE '%error%' OR event_type IN ('ai_provider_error','file_error','vision_error','image_error','voice_error'))
-        """)
 
         model_rows = await conn.fetch("""
             SELECT details AS model, COUNT(*) AS count
@@ -1744,14 +1597,7 @@ async def refstats_handler(message: Message):
         total_referrals = await conn.fetchval("SELECT COUNT(*) FROM referrals")
         paid_referrals = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE status='paid'")
         rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards")
-        bonus_requests_total = await conn.fetchval("SELECT COALESCE(SUM(bonus_requests), 0) FROM users")
         abuse_events = await conn.fetchval("SELECT COUNT(*) FROM referral_abuse_events")
-        recent_reward_rows = await conn.fetch("""
-            SELECT referrer_id, milestone, reward_title, source_count, created_at
-            FROM referral_rewards
-            ORDER BY created_at DESC
-            LIMIT 8
-        """)
         top_rows = await conn.fetch("""
             SELECT r.referrer_id,
                    COALESCE(u.username, u.first_name, r.referrer_id::text) AS name,
@@ -1779,127 +1625,13 @@ async def refstats_handler(message: Message):
             for index, row in enumerate(top_rows, start=1)
         )
 
-    recent_rewards_text = "Пока нет выданных бонусов."
-    if recent_reward_rows:
-        recent_rewards_text = "\n".join(
-            f"• ID {row['referrer_id']} — {row['reward_title'] or referral_reward_title(row['milestone'])} ({fmt_dt(row['created_at'])})"
-            for row in recent_reward_rows
-        )
-
     await message.answer(
         "💰 Referral stats\n\n"
         f"Всего приглашений: {total_referrals}\n"
         f"Оплат от приглашённых: {paid_referrals}\n"
-        f"Конверсия в оплату: {percent(paid_referrals, total_referrals)}\n"
         f"Выдано бонусов: {rewards_count}\n"
-        f"Бонусных запросов на балансах: {bonus_requests_total}\n"
         f"Anti-abuse событий: {abuse_events}\n\n"
-        f"🏆 Топ партнёров:\n{top_text}\n\n"
-        f"🎁 Последние бонусы:\n{recent_rewards_text}"
-    )
-
-
-@dp.message(Command("health"))
-async def admin_health_command(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    started_delta = datetime.utcnow() - STARTED_AT
-    uptime_seconds = int(started_delta.total_seconds())
-    uptime_text = f"{uptime_seconds // 3600}ч {(uptime_seconds % 3600) // 60}м"
-
-    db_status = "❌ ERROR"
-    db_latency_ms = 0
-    try:
-        start = time.perf_counter()
-        async with db_pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        db_latency_ms = round((time.perf_counter() - start) * 1000)
-        db_status = "✅ OK"
-    except Exception as e:
-        db_status = f"❌ {short_error_text(e)[:120]}"
-
-    bot_status = "❌ ERROR"
-    bot_username_text = "—"
-    try:
-        me = await get_bot_me_cached()
-        bot_username_text = f"@{me.username}" if me and me.username else "—"
-        bot_status = "✅ OK"
-    except Exception as e:
-        bot_status = f"❌ {short_error_text(e)[:120]}"
-
-    tavily_status = "❌ OFF"
-    if TAVILY_API_KEY:
-        try:
-            test_results = await search_web("OpenAI latest news")
-            tavily_status = "✅ ON / search OK" if test_results else "⚠️ KEY SET / no results"
-        except Exception as e:
-            tavily_status = f"❌ ERROR: {short_error_text(e)[:90]}"
-
-    redis_ok, redis_latency_ms, redis_details = await redis_health()
-    queue_size = await event_queue_size()
-    redis_status = "✅ OK" if redis_ok else f"⚠️ {redis_details}"
-
-    await message.answer(
-        "🩺 VSotahBot Health\n\n"
-        f"Bot API: {bot_status}\n"
-        f"Bot: {bot_username_text}\n"
-        f"PostgreSQL: {db_status}\n"
-        f"DB latency: {db_latency_ms} ms\n"
-        f"Uptime: {uptime_text}\n\n"
-        f"OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
-        f"Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
-        f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
-        f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
-        f"Live Web / Tavily: {tavily_status}\n"
-        f"Redis cache: {redis_status}\n"
-        f"Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
-        f"Event queue: {queue_size}\n"
-        f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
-    )
-
-
-@dp.message(Command("errors"))
-async def admin_errors_command(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    async with db_pool.acquire() as conn:
-        error_rows = await conn.fetch("""
-            SELECT event_type, details, telegram_id, created_at
-            FROM events
-            WHERE event_type ILIKE '%error%'
-               OR event_type IN ('ai_provider_error','file_error','vision_error','image_error','voice_error')
-            ORDER BY created_at DESC
-            LIMIT 15
-        """)
-        limit_rows = await conn.fetch("""
-            SELECT details, COUNT(*) AS count
-            FROM events
-            WHERE event_type='limit_reached' AND created_at >= NOW() - INTERVAL '24 hours'
-            GROUP BY details
-            ORDER BY count DESC
-            LIMIT 8
-        """)
-
-    errors_text = "Ошибок пока нет."
-    if error_rows:
-        errors_text = "\n".join(
-            f"• {fmt_dt(row['created_at'])} | {row['event_type']} | ID {row['telegram_id'] or '—'} | {(row['details'] or '')[:140]}"
-            for row in error_rows
-        )
-
-    limits_text = "Лимиты за 24 часа не упирались."
-    if limit_rows:
-        limits_text = "\n".join(
-            f"• {row['details'] or 'unknown'}: {row['count']}"
-            for row in limit_rows
-        )
-
-    await message.answer(
-        "⚠️ VSotah Errors / Limits\n\n"
-        f"Последние ошибки:\n{errors_text}\n\n"
-        f"Лимиты за 24 часа:\n{limits_text}"
+        f"🏆 Топ партнёров:\n{top_text}"
     )
 
 
@@ -1992,131 +1724,6 @@ async def setfree_handler(message: Message):
     await admin_set_plan(message, "FREE")
 
 
-
-async def run_work_ai_command(message: Message, mode: str, router_func, title: str, wait_text: str):
-    """AI Core Upgrade: serious work modes without adding heavy UI."""
-    raw_text = message.text or ""
-    prompt = raw_text.split(maxsplit=1)[1].strip() if len(raw_text.split(maxsplit=1)) > 1 else ""
-
-    if not prompt:
-        examples = {
-            "research": "Например: /research рынок Telegram AI-ботов в 2026 и как продвигать VSotahBot",
-            "business": "Например: /business напиши коммерческое предложение для рекламы VSotahBot в каналах",
-            "code": "Например: /code объясни ошибку Railway и предложи готовое исправление",
-            "web": "Например: /web последние новости OpenAI и Gemini сегодня",
-        }
-        await message.answer(
-            f"{title}\n\nНапишите запрос после команды.\n\n{examples.get(mode, '')}",
-            reply_markup=main_menu(),
-        )
-        return
-
-    user = await get_or_create_user(message)
-    spam_allowed, wait_seconds = await check_spam(message.from_user.id)
-    if not spam_allowed:
-        await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
-        return
-
-    allowed, reason = await check_limit(user)
-    if not allowed:
-        await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
-        return
-
-    selected_model = user["selected_model"]
-    if selected_model in {"nanobanana", "gptimage"}:
-        selected_model = "gpt"
-
-    if not has_model_access(user["plan"], selected_model):
-        selected_model = "gpt"
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
-
-    wait_message = await message.answer(wait_text)
-
-    try:
-        await save_message(message.from_user.id, "user", f"[{mode.upper()}] {prompt}")
-        history = await get_chat_history(message.from_user.id)
-
-        try:
-            await wait_message.edit_text("⚡ Собираю контекст и думаю...")
-        except Exception:
-            pass
-
-        answer = await router_func(selected_model, history)
-        if not answer:
-            answer = "⚠️ AI вернул пустой ответ. Попробуйте переформулировать запрос."
-
-        await save_message(message.from_user.id, "assistant", answer)
-        await increase_usage(message.from_user.id)
-        await log_event(message.from_user.id, f"ai_{mode}", selected_model)
-
-        if len(answer) <= 3900:
-            await wait_message.edit_text(answer)
-        else:
-            await wait_message.edit_text(answer[:3900])
-            for i in range(3900, len(answer), 3900):
-                await message.answer(answer[i:i + 3900])
-
-    except Exception as e:
-        admin_error = short_error_text(e)
-        print(f"{mode.upper()} AI ERROR SHORT:\n{admin_error}")
-        print(f"{mode.upper()} AI ERROR TRACE:\n{traceback.format_exc()}")
-        await log_event(message.from_user.id, f"{mode}_error", admin_error)
-        await send_ai_error_to_admin(f"⚠️ {mode.upper()} AI ERROR | {selected_model} | {admin_error}")
-        try:
-            await wait_message.edit_text(
-                "⚠️ Не удалось обработать запрос. Попробуйте позже или выберите другую нейросеть.",
-                reply_markup=main_menu(),
-            )
-        except Exception:
-            await message.answer("⚠️ Не удалось обработать запрос.", reply_markup=main_menu())
-
-
-@dp.message(Command("research"))
-async def research_command(message: Message):
-    await run_work_ai_command(
-        message,
-        "research",
-        research_router,
-        "🔎 Deep Research Lite",
-        "🔎 Ищу и анализирую информацию...",
-    )
-
-
-@dp.message(Command("web"))
-async def web_command(message: Message):
-    await run_work_ai_command(
-        message,
-        "web",
-        web_router,
-        "🌐 Live Web AI",
-        "🌐 Проверяю актуальную информацию...",
-    )
-
-
-@dp.message(Command("business"))
-async def business_command(message: Message):
-    await run_work_ai_command(
-        message,
-        "business",
-        business_router,
-        "💼 Business AI",
-        "💼 Готовлю рабочий ответ...",
-    )
-
-
-@dp.message(Command("code"))
-async def code_command(message: Message):
-    await run_work_ai_command(
-        message,
-        "code",
-        code_router,
-        "💻 Code AI",
-        "💻 Анализирую код/ошибку...",
-    )
-
-
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     user = await get_or_create_user(message)
@@ -2189,11 +1796,6 @@ async def photo_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_vision", selected_model)
 
-        try:
-            await wait_message.edit_text("✅ Готово")
-        except Exception:
-            pass
-
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
         else:
@@ -2205,7 +1807,6 @@ async def photo_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"VISION ERROR SHORT:\n{admin_error}")
         print(f"VISION ERROR TRACE:\n{traceback.format_exc()}")
-        await log_event(message.from_user.id, "vision_error", admin_error)
 
         try:
             await wait_message.edit_text(
@@ -2304,11 +1905,6 @@ async def document_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_file", selected_model)
 
-        try:
-            await wait_message.edit_text("✅ Готово")
-        except Exception:
-            pass
-
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
         else:
@@ -2320,7 +1916,6 @@ async def document_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"FILE ERROR SHORT:\n{admin_error}")
         print(f"FILE ERROR TRACE:\n{traceback.format_exc()}")
-        await log_event(message.from_user.id, "file_error", admin_error)
 
         try:
             await wait_message.edit_text(
@@ -2334,45 +1929,8 @@ async def document_handler(message: Message):
             )
 
 
-async def send_fast_voice_reply(message: Message, answer: str):
-    """Generate a short voice reply in background so text answer stays instant."""
-    status_message = None
-    try:
-        status_message = await message.answer("🔊 Голосовой ответ готовится в фоне...")
-        audio_reply = await text_to_speech(answer)
-        if not audio_reply:
-            if status_message:
-                await status_message.edit_text("⚠️ Не удалось подготовить голосовой ответ.")
-            return
-
-        filename = "vsotah_voice_reply.ogg"
-        audio = BufferedInputFile(audio_reply, filename=filename)
-        await message.answer_voice(voice=audio, caption="🔊 Голосовой ответ")
-
-        if status_message:
-            try:
-                await status_message.delete()
-            except Exception:
-                await status_message.edit_text("✅ Голосовой ответ отправлен.")
-
-    except Exception as voice_reply_error:
-        await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
-        print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
-        if status_message:
-            try:
-                await status_message.edit_text("⚠️ Голосовой ответ не получился, но текстовый ответ выше уже готов.")
-            except Exception:
-                pass
-
-
 @dp.message(F.voice)
 async def voice_handler(message: Message):
-    """Voice AI 2.0: free voice assistant for all users.
-
-    Voice messages do not consume daily/weekly request limits.
-    Text answer is always returned; voice reply is enabled by default and can be disabled
-    with VOICE_REPLY_ENABLED=false in Railway Variables.
-    """
     user = await get_or_create_user(message)
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
 
@@ -2380,15 +1938,27 @@ async def voice_handler(message: Message):
         await message.answer(f"🛡 Слишком много сообщений подряд.\n\nПопробуйте снова через {wait_seconds} сек.")
         return
 
+    allowed, reason = await check_limit(user)
+    if not allowed:
+        await log_event(message.from_user.id, "limit_reached", reason)
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        return
+
     selected_model = user["selected_model"]
     if selected_model in {"nanobanana", "gptimage"}:
-        selected_model = "gpt"
+        await message.answer(
+            "🎙 Для голосового общения выберите ChatGPT, Claude или Gemini в меню «Выбрать AI».",
+            reply_markup=main_menu(),
+        )
+        return
 
     if not has_model_access(user["plan"], selected_model):
         selected_model = "gpt"
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
-        await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT — GPT-4o mini.")
+        await message.answer(
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+        )
 
     wait_message = await message.answer("🎙 Слушаю голосовое...")
 
@@ -2408,39 +1978,32 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
         history = await get_chat_history(message.from_user.id)
 
-        await wait_message.edit_text("Печатает ответ...")
-        loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
+        await wait_message.edit_text("🧠 Думаю над ответом...")
         answer = await ai_router(selected_model, history)
 
         if not answer:
             answer = "⚠️ AI вернул пустой ответ. Попробуйте записать вопрос ещё раз."
 
         await save_message(message.from_user.id, "assistant", answer)
-        await log_event(message.from_user.id, "ai_voice_free", selected_model)
+        await increase_usage(message.from_user.id)
+        await log_event(message.from_user.id, "ai_voice", selected_model)
 
-        loading_task.cancel()
-        try:
-            await loading_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        await finish_loading_message(wait_message)
-
-        # Пользователю не нужен технический блок "Распознал / Ответ".
-        # Показываем сразу готовый ответ, как в обычном чате.
-        response_text = answer
+        response_text = f"🎙 Распознал:\n{transcript}\n\nОтвет:\n{answer}"
         if len(response_text) <= 3900:
-            await message.answer(response_text)
+            await wait_message.edit_text(response_text)
         else:
-            await message.answer(response_text[:3900])
+            await wait_message.edit_text(response_text[:3900])
             for i in range(3900, len(response_text), 3900):
                 await message.answer(response_text[i:i + 3900])
 
         if VOICE_REPLY_ENABLED:
-            # Do not block the voice handler while TTS is being generated.
-            # The user already has the full text answer; the short audio answer arrives separately.
-            asyncio.create_task(send_fast_voice_reply(message, answer))
+            try:
+                audio_reply = await text_to_speech(answer)
+                if audio_reply:
+                    audio = BufferedInputFile(audio_reply, filename="vsotah_voice_reply.mp3")
+                    await message.answer_audio(audio=audio, caption="🔊 Голосовой ответ VSotah AI")
+            except Exception as voice_reply_error:
+                print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
 
     except ValueError as e:
         error_code = str(e)
@@ -2453,7 +2016,6 @@ async def voice_handler(message: Message):
         admin_error = short_error_text(e)
         print(f"VOICE ERROR SHORT:\n{admin_error}")
         print(f"VOICE ERROR TRACE:\n{traceback.format_exc()}")
-        await log_event(message.from_user.id, "voice_error", admin_error)
         await send_ai_error_to_admin(f"⚠️ VOICE AI ERROR | {selected_model} | {admin_error}")
 
         try:
@@ -2541,7 +2103,6 @@ async def chat_handler(message: Message):
             admin_error = short_error_text(e)
             print(f"IMAGE ERROR SHORT:\n{admin_error}")
             print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
-            await log_event(message.from_user.id, "image_error", admin_error)
             try:
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
@@ -2554,16 +2115,11 @@ async def chat_handler(message: Message):
                 )
             return
 
-    # Не отправляем Telegram chat_action typing для обычного текста:
-    # на некоторых клиентах он может висеть сверху уже после ответа.
-    # Вместо этого используем своё короткое loading-сообщение с живыми точками.
     wait_message = await message.answer("Печатает ответ...")
-    loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
 
     try:
         await save_message(message.from_user.id, "user", message.text)
         history = await get_chat_history(message.from_user.id)
-
         answer = await ai_router(selected_model, history)
 
         if not answer:
@@ -2573,34 +2129,17 @@ async def chat_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_message", selected_model)
 
-        loading_task.cancel()
-        try:
-            await loading_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        await finish_loading_message(wait_message)
-
         if len(answer) <= 3900:
-            await message.answer(answer)
+            await wait_message.edit_text(answer)
         else:
-            await message.answer(answer[:3900])
+            await wait_message.edit_text(answer[:3900])
             for i in range(3900, len(answer), 3900):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
-        loading_task.cancel()
-        try:
-            await loading_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
         admin_error = short_error_text(e)
         print(f"AI ERROR SHORT:\n{admin_error}")
         print(f"AI ERROR TRACE:\n{traceback.format_exc()}")
-        await log_event(message.from_user.id, "ai_provider_error", admin_error)
 
         await send_ai_error_to_admin(f"⚠️ AI ERROR | {selected_model} | {admin_error}")
 
@@ -2619,7 +2158,34 @@ async def chat_handler(message: Message):
 
 
 async def health_handler(request):
-    return web.json_response({"ok": True, "service": "vsotah-bot"})
+    return web.json_response({
+        "ok": True,
+        "service": "vsotah-bot",
+        "mode": "webhook" if WEBHOOK_MODE else "polling",
+        "webhook_path": WEBHOOK_PATH if WEBHOOK_MODE else None,
+    })
+
+
+async def telegram_webhook_handler(request):
+    """Telegram webhook endpoint for aiogram 3.
+
+    This keeps all existing handlers in app/bot_app.py. Telegram sends updates here,
+    and Dispatcher processes them exactly as it processed polling updates before.
+    """
+    if WEBHOOK_SECRET:
+        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if received_secret != WEBHOOK_SECRET:
+            return web.json_response({"ok": False, "error": "forbidden"}, status=403)
+
+    try:
+        data = await request.json()
+        update = Update.model_validate(data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+        return web.json_response({"ok": True})
+    except Exception as e:
+        print(f"TELEGRAM WEBHOOK ERROR: {e}")
+        print(traceback.format_exc())
+        return web.json_response({"ok": False}, status=500)
 
 
 async def tribute_webhook_handler(request):
@@ -2638,11 +2204,35 @@ async def start_web_server():
     app.router.add_get("/health", health_handler)
     app.router.add_post("/tribute-webhook", tribute_webhook_handler)
 
+    if WEBHOOK_MODE:
+        app.router.add_post(WEBHOOK_PATH, telegram_webhook_handler)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"WEB SERVER STARTED ON PORT {PORT}")
+    return runner
+
+
+async def setup_telegram_delivery():
+    if WEBHOOK_MODE:
+        if not WEBHOOK_URL:
+            raise RuntimeError("WEBHOOK_MODE=true, but WEBHOOK_URL is missing")
+
+        full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+        await bot.delete_webhook(drop_pending_updates=WEBHOOK_DROP_PENDING_UPDATES)
+        await bot.set_webhook(
+            url=full_webhook_url,
+            secret_token=WEBHOOK_SECRET or None,
+            drop_pending_updates=WEBHOOK_DROP_PENDING_UPDATES,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+        print(f"WEBHOOK SET: {full_webhook_url}")
+        return
+
+    # Polling mode remains the default safe behavior.
+    await bot.delete_webhook(drop_pending_updates=True)
 
 
 async def main():
@@ -2655,23 +2245,30 @@ async def main():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is missing")
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    redis_enabled = await init_performance_layer()
-    print(f"REDIS CACHE {'CONNECTED' if redis_enabled else 'DISABLED'}")
     await init_db()
-    await start_event_worker(db_pool)
     await setup_bot_info()
-    await start_web_server()
+    await setup_telegram_delivery()
+    runner = await start_web_server()
 
     print("DATABASE CONNECTED")
     print("BOT STARTED")
 
+    if WEBHOOK_MODE:
+        print("BOT RUNNING IN WEBHOOK MODE")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await bot.delete_webhook(drop_pending_updates=False)
+            await runner.cleanup()
+            await bot.session.close()
+        return
+
+    print("BOT RUNNING IN POLLING MODE")
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
