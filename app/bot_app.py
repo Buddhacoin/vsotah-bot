@@ -2234,7 +2234,9 @@ async def photo_handler(message: Message):
         )
         return
 
-    wait_message = await message.answer("🖼 Редактирую изображение..." if is_image_edit else "📷 Анализирую фото...")
+    wait_text = "Редактирую изображение" if is_image_edit else "Анализирую фото"
+    wait_message = await message.answer(f"{wait_text}...")
+    loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
 
     try:
         question = message.caption or ("Улучши это изображение, сохрани человека, лицо, позу и естественный вид." if is_image_edit else "Что изображено на фото?")
@@ -2249,15 +2251,31 @@ async def photo_handler(message: Message):
 
             if not edited_bytes:
                 print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
+                if loading_task:
+                    loading_task.cancel()
+                    try:
+                        await loading_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
 
+            if loading_task:
+                loading_task.cancel()
+                try:
+                    await loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             photo = BufferedInputFile(edited_bytes, filename="edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png")
             await wait_message.delete()
-            await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "✅ Готово"))
+            await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "Готово"))
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
             await increase_image_usage(message.from_user.id)
@@ -2275,10 +2293,14 @@ async def photo_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_vision", selected_model)
 
-        try:
-            await wait_message.edit_text("✅ Готово")
-        except Exception:
-            pass
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2288,6 +2310,14 @@ async def photo_handler(message: Message):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
+        if 'loading_task' in locals() and loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         admin_error = short_error_text(e)
         print(f"VISION ERROR SHORT:\n{admin_error}")
         print(f"VISION ERROR TRACE:\n{traceback.format_exc()}")
@@ -2390,10 +2420,14 @@ async def document_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_file", selected_model)
 
-        try:
-            await wait_message.edit_text("✅ Готово")
-        except Exception:
-            pass
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2612,8 +2646,9 @@ async def chat_handler(message: Message):
             )
             return
 
-        wait_text = "🍌 Генерирую изображение..." if selected_model == "nanobanana" else "🌀 Генерирую изображение..."
-        wait_message = await message.answer(wait_text)
+        wait_text = "Генерирую изображение"
+        wait_message = await message.answer(f"{wait_text}...")
+        loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
         try:
             await save_message(message.from_user.id, "user", message.text)
 
@@ -2624,18 +2659,34 @@ async def chat_handler(message: Message):
 
             if not image_bytes:
                 print(f"IMAGE PROVIDER RETURNED NO IMAGE | {selected_model} | {(text_note or '')[:1000]}")
+                if loading_task:
+                    loading_task.cancel()
+                    try:
+                        await loading_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
 
+            if loading_task:
+                loading_task.cancel()
+                try:
+                    await loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
             photo = BufferedInputFile(image_bytes, filename=filename)
             await wait_message.delete()
             await message.answer_photo(
                 photo=photo,
-                caption=(text_note[:900] if text_note else "✅ Готово"),
+                caption=(text_note[:900] if text_note else "Готово"),
             )
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
@@ -2645,6 +2696,14 @@ async def chat_handler(message: Message):
             return
 
         except Exception as e:
+            if 'loading_task' in locals() and loading_task:
+                loading_task.cancel()
+                try:
+                    await loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             admin_error = short_error_text(e)
             print(f"IMAGE ERROR SHORT:\n{admin_error}")
             print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
