@@ -24,6 +24,7 @@ from aiogram.types import (
 
 from app.ai.router import (
     ai_router,
+    provider_status_report,
     vision_router,
     generate_nano_banana_image,
     generate_gpt_image,
@@ -64,7 +65,7 @@ AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
 MAX_VOICE_SIZE = int(os.getenv("MAX_VOICE_SIZE", str(20 * 1024 * 1024)))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
-VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
 
 PORT = int(os.getenv("PORT", "8080"))
@@ -828,16 +829,18 @@ async def build_referral_leaderboard_text() -> str:
     )
 
 async def setup_bot_info():
-    # В меню команд оставляем только рабочие действия. /start продолжает работать,
-    # но не показывается как большая кнопка Start в чате.
-    await bot.set_my_commands([
+    # Важно: /start не добавляем в command menu.
+    # Если /start появляется в меню команд, Telegram иногда подставляет большую кнопку «Старт»,
+    # которая перекрывает поле ввода. Сам /start-handler продолжает работать.
+    commands = [
         BotCommand(command="account", description="👤 Мой профиль"),
         BotCommand(command="premium", description="💳 Купить подписку"),
         BotCommand(command="models", description="🤖 Выбрать AI"),
         BotCommand(command="referral", description="💰 Заработать"),
         BotCommand(command="channels", description="🧠 Наши каналы"),
         BotCommand(command="deletecontext", description="💬 Удалить контекст"),
-    ])
+    ]
+    await bot.set_my_commands(commands)
 
 
 async def get_or_create_user_by_data(telegram_id, username=None, first_name=None):
@@ -1490,6 +1493,28 @@ async def admin_handler(message: Message):
     )
 
 
+
+
+@dp.message(Command("health"))
+async def admin_health_command(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    provider_text = provider_status_report()
+    tavily_state = "✅ ON" if os.getenv("TAVILY_API_KEY") else "⚠️ OFF"
+    voice_state = "✅ ON" if VOICE_REPLY_ENABLED and OPENAI_API_KEY else "⚠️ OFF"
+
+    await message.answer(
+        "🩺 VSotah Health\n\n"
+        "🤖 AI providers:\n"
+        f"{provider_text}\n\n"
+        f"🌐 Live Web / Tavily: {tavily_state}\n"
+        f"🎙 Voice reply: {voice_state}\n"
+        f"🗄 Database: ✅ connected\n"
+        f"🚀 Bot: ✅ running"
+    )
+
+
 @dp.message(Command("stats"))
 async def stats_handler(message: Message):
     if not is_admin(message.from_user.id):
@@ -1787,11 +1812,6 @@ async def photo_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_vision", selected_model)
 
-        try:
-            await wait_message.edit_text("✨ Формирую ответ...")
-        except Exception:
-            pass
-
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
         else:
@@ -1901,11 +1921,6 @@ async def document_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_file", selected_model)
 
-        try:
-            await wait_message.edit_text("✨ Формирую ответ...")
-        except Exception:
-            pass
-
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
         else:
@@ -1979,7 +1994,7 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
         history = await get_chat_history(message.from_user.id)
 
-        await wait_message.edit_text("Печатает ответ...")
+        await wait_message.edit_text("🧠 Думаю над ответом...")
         answer = await ai_router(selected_model, history)
 
         if not answer:
@@ -1989,20 +2004,21 @@ async def voice_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_voice", selected_model)
 
-        response_text = answer
-        if len(response_text) <= 3900:
-            await wait_message.edit_text(response_text)
+        # Пользователь отправил аудио — сначала даём чистый текстовый ответ,
+        # затем отправляем аудио-ответ приятным женским голосом.
+        if len(answer) <= 3900:
+            await wait_message.edit_text(answer)
         else:
-            await wait_message.edit_text(response_text[:3900])
-            for i in range(3900, len(response_text), 3900):
-                await message.answer(response_text[i:i + 3900])
+            await wait_message.edit_text(answer[:3900])
+            for i in range(3900, len(answer), 3900):
+                await message.answer(answer[i:i + 3900])
 
         if VOICE_REPLY_ENABLED:
             try:
                 audio_reply = await text_to_speech(answer)
                 if audio_reply:
                     audio = BufferedInputFile(audio_reply, filename="vsotah_voice_reply.mp3")
-                    await message.answer_audio(audio=audio, caption="Голосовой ответ")
+                    await message.answer_audio(audio=audio, caption="🔊 Голосовой ответ")
             except Exception as voice_reply_error:
                 print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
 
@@ -2029,18 +2045,6 @@ async def voice_handler(message: Message):
                 "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
-
-
-async def animate_loading_message(wait_message: Message, stop_event: asyncio.Event):
-    frames = ["Печатает ответ.", "Печатает ответ..", "Печатает ответ..."]
-    index = 0
-    while not stop_event.is_set():
-        try:
-            await wait_message.edit_text(frames[index % len(frames)])
-        except Exception:
-            pass
-        index += 1
-        await asyncio.sleep(0.42)
 
 
 @dp.message(F.text)
@@ -2128,24 +2132,12 @@ async def chat_handler(message: Message):
                 )
             return
 
-    # Не используем Telegram typing: на некоторых клиентах он висит после ответа.
-    # Вместо этого показываем короткую живую анимацию точек и заменяем её итоговым ответом.
     wait_message = await message.answer("Печатает ответ...")
 
     try:
         await save_message(message.from_user.id, "user", message.text)
         history = await get_chat_history(message.from_user.id)
-
-        stop_loading = asyncio.Event()
-        loading_task = asyncio.create_task(animate_loading_message(wait_message, stop_loading))
-        try:
-            answer = await ai_router(selected_model, history)
-        finally:
-            stop_loading.set()
-            try:
-                await loading_task
-            except Exception:
-                pass
+        answer = await ai_router(selected_model, history)
 
         if not answer:
             answer = "⚠️ AI вернул пустой ответ. Попробуйте переформулировать вопрос."
@@ -2153,11 +2145,6 @@ async def chat_handler(message: Message):
         await save_message(message.from_user.id, "assistant", answer)
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_message", selected_model)
-
-        try:
-            await wait_message.edit_text("✨ Формирую ответ...")
-        except Exception:
-            pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2237,7 +2224,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
