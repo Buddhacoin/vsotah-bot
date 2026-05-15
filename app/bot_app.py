@@ -207,11 +207,11 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini", callback_data="set_model_gpt")],
-            [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash", callback_data="set_model_gemini")],
-            [InlineKeyboardButton(text="✴️ Claude — Sonnet", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-5.1", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="✦ Gemini — 3.1 Flash", callback_data="set_model_gemini")],
+            [InlineKeyboardButton(text="✴️ Claude — Sonnet 4.6", callback_data="set_model_claude")],
             [InlineKeyboardButton(text="🍌 Nano Banana Pro", callback_data="set_model_nanobanana")],
-            [InlineKeyboardButton(text="🌀 GPT Image", callback_data="set_model_gptimage")],
+            [InlineKeyboardButton(text="🌀 GPT Image 2", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -330,13 +330,13 @@ def has_model_access(user_plan: str | None, model: str) -> bool:
 
 def model_display_name(model: str) -> str:
     names = {
-        "gpt": "🌀 ChatGPT — GPT-4o mini",
-        "gemini": "✦ Gemini — 2.5 Flash",
-        "claude": "✴️ Claude — Sonnet",
+        "gpt": "🌀 ChatGPT — GPT-5.1",
+        "gemini": "✦ Gemini — 3.1 Flash",
+        "claude": "✴️ Claude — Sonnet 4.6",
         "nanobanana": "🍌 Nano Banana Pro",
-        "gptimage": "🌀 GPT Image",
+        "gptimage": "🌀 GPT Image 2",
     }
-    return names.get(model, "🌀 ChatGPT — GPT-4o mini")
+    return names.get(model, "🌀 ChatGPT — GPT-5.1")
 
 
 def premium_required_text(model: str) -> str:
@@ -350,16 +350,16 @@ def premium_required_text(model: str) -> str:
 def welcome_text():
     return """👋 Добро пожаловать в @VSotahBot
 
-Ваш AI-бот для работы с нейросетями в одном месте.
+Ваш AI-бот для бесплатной работы с нейросетями в одном месте.
 
 📝 Генерация текста:
-• ChatGPT
-• Claude
-• Gemini
+• ChatGPT 5.1
+• Claude 4.6
+• Gemini 3.1
 
 🌇 Генерация изображений:
 • Nano Banana Pro
-• GPT Image
+• GPT Image 2
 
 📷 Анализ фото:
 • вопросы по изображениям
@@ -377,11 +377,11 @@ def premium_text():
     return """💳 Купить подписку
 
 🟢 FREE
-• ChatGPT — GPT-4o mini
-• Gemini — 2.5 Flash
-• Claude — Sonnet
+• ChatGPT — GPT-5.1
+• Gemini — 3.1 Flash
+• Claude — Sonnet 4.6
 • Nano Banana Pro
-• GPT Image
+• GPT Image 2
 
 • 15 запросов в день
 • из них 5 Image
@@ -2221,7 +2221,7 @@ async def photo_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT."
         )
 
     is_image_edit = selected_model in {"nanobanana", "gptimage"}
@@ -2365,7 +2365,7 @@ async def document_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT."
         )
 
     wait_message = await message.answer("📎 Читаю файл...")
@@ -2529,7 +2529,7 @@ async def voice_handler(message: Message):
         selected_model = "gpt"
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
-        await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT — GPT-4o mini.")
+        await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT.")
 
     wait_message = await message.answer("🎙 Слушаю голосовое...")
 
@@ -2633,7 +2633,7 @@ async def chat_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT."
         )
 
     if selected_model in {"nanobanana", "gptimage"}:
