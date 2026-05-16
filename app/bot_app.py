@@ -6,6 +6,8 @@ import traceback
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
+from PIL import Image, ImageFilter, ImageOps
+
 import asyncpg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -38,6 +40,7 @@ from app.ai.router import (
     search_web,
     vision_router,
     generate_nano_banana_image,
+    edit_nano_banana_image,
     generate_gpt_image,
     edit_gpt_image,
 )
@@ -48,6 +51,7 @@ from app.ai.file_router import (
     build_file_status_text,
 )
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
+from app.ai.memory import build_dialogue_memory_note
 from app.referrals import build_referral_link, parse_referral_code, build_invite_text, build_telegram_share_url
 from app.performance import (
     init_performance_layer,
@@ -68,18 +72,18 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini")
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.1-chat-latest")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.1-chat-latest")
 ANTHROPIC_TEXT_MODEL = os.getenv("ANTHROPIC_TEXT_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_VISION_MODEL = os.getenv("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
-NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "imagen-4.0-generate-001")
-GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-1")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.1-flash")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.1-flash")
+NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "gemini-3-pro-image-preview")
+GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-2")
 GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
 
 # Speed settings. You can override these in Railway Variables if needed.
-TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "6"))
+TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "14"))
 VISION_HISTORY_LIMIT = int(os.getenv("VISION_HISTORY_LIMIT", "2"))
 TEXT_MAX_TOKENS = int(os.getenv("TEXT_MAX_TOKENS", "1200"))
 VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
@@ -205,11 +209,11 @@ def main_menu():
 def models_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-4o mini", callback_data="set_model_gpt")],
-            [InlineKeyboardButton(text="✦ Gemini — 2.5 Flash", callback_data="set_model_gemini")],
-            [InlineKeyboardButton(text="✴️ Claude — Sonnet", callback_data="set_model_claude")],
+            [InlineKeyboardButton(text="🌀 ChatGPT — GPT-5.1", callback_data="set_model_gpt")],
+            [InlineKeyboardButton(text="✦ Gemini — 3.1 Flash", callback_data="set_model_gemini")],
+            [InlineKeyboardButton(text="✴️ Claude — Sonnet 4.6", callback_data="set_model_claude")],
             [InlineKeyboardButton(text="🍌 Nano Banana Pro", callback_data="set_model_nanobanana")],
-            [InlineKeyboardButton(text="🌀 Sora GPT Image", callback_data="set_model_gptimage")],
+            [InlineKeyboardButton(text="🌀 GPT Image 2", callback_data="set_model_gptimage")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
         ]
     )
@@ -328,13 +332,13 @@ def has_model_access(user_plan: str | None, model: str) -> bool:
 
 def model_display_name(model: str) -> str:
     names = {
-        "gpt": "🌀 ChatGPT — GPT-4o mini",
-        "gemini": "✦ Gemini — 2.5 Flash",
-        "claude": "✴️ Claude — Sonnet",
+        "gpt": "🌀 ChatGPT — GPT-5.1",
+        "gemini": "✦ Gemini — 3.1 Flash",
+        "claude": "✴️ Claude — Sonnet 4.6",
         "nanobanana": "🍌 Nano Banana Pro",
-        "gptimage": "🌀 Sora GPT Image",
+        "gptimage": "🌀 GPT Image 2",
     }
-    return names.get(model, "🌀 ChatGPT — GPT-4o mini")
+    return names.get(model, "🌀 ChatGPT — GPT-5.1")
 
 
 def premium_required_text(model: str) -> str:
@@ -348,16 +352,16 @@ def premium_required_text(model: str) -> str:
 def welcome_text():
     return """👋 Добро пожаловать в @VSotahBot
 
-Ваш AI-бот для работы с нейросетями в одном месте.
+Ваш AI-бот для бесплатной работы с нейросетями в одном месте.
 
 📝 Генерация текста:
-• ChatGPT
-• Claude
-• Gemini
+• ChatGPT 5.1
+• Claude 4.6
+• Gemini 3.1
 
 🌇 Генерация изображений:
 • Nano Banana Pro
-• Sora GPT Image
+• GPT Image 2
 
 📷 Анализ фото:
 • вопросы по изображениям
@@ -375,11 +379,11 @@ def premium_text():
     return """💳 Купить подписку
 
 🟢 FREE
-• ChatGPT — GPT-4o mini
-• Gemini — 2.5 Flash
-• Claude — Sonnet
+• ChatGPT — GPT-5.1
+• Gemini — 3.1 Flash
+• Claude — Sonnet 4.6
 • Nano Banana Pro
-• Sora GPT Image
+• GPT Image 2
 
 • 15 запросов в день
 • из них 5 Image
@@ -1078,14 +1082,18 @@ async def save_message(telegram_id, role, content):
             content[:12000],
         )
     await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
+    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}:memory2")
 
 
 async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
-    cache_key = f"history:{telegram_id}:{limit}"
+    cache_key = f"history:{telegram_id}:{limit}:memory2"
     cached_history = await cache_get(cache_key)
     if cached_history is not None:
         return cached_history
 
+    # AI Memory 2.0: fetch a wider recent window, build a compact deterministic
+    # memory note, then keep only the freshest turns for the actual dialogue.
+    fetch_limit = max(limit, 24)
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
@@ -1093,21 +1101,28 @@ async def get_chat_history(telegram_id, limit=TEXT_HISTORY_LIMIT):
             WHERE telegram_id=$1
             ORDER BY created_at DESC
             LIMIT $2
-        """, telegram_id, limit)
+        """, telegram_id, fetch_limit)
 
-    history = []
+    full_history = []
     for row in reversed(rows):
         if row["role"] in {"user", "assistant", "system"}:
-            history.append({"role": row["role"], "content": row["content"]})
+            full_history.append({"role": row["role"], "content": row["content"]})
+
+    recent_history = full_history[-limit:]
+    memory_note = build_dialogue_memory_note(full_history)
+    history = []
+    if memory_note:
+        history.append({"role": "system", "content": memory_note})
+    history.extend(recent_history)
 
     await cache_set(cache_key, history, ttl_seconds=20)
     return history
-
 
 async def clear_chat(telegram_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE telegram_id=$1", telegram_id)
     await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}")
+    await cache_delete(f"history:{telegram_id}:{TEXT_HISTORY_LIMIT}:memory2")
     await log_event(telegram_id, "delete_context")
 
 
@@ -1128,7 +1143,7 @@ async def user_profile_text(user):
         "claude": "Claude",
         "gemini": "Gemini",
         "nanobanana": "Nano Banana",
-        "gptimage": "Sora GPT Image",
+        "gptimage": "GPT Image",
         "deepseek": "DeepSeek",
     }
 
@@ -1172,7 +1187,7 @@ async def user_profile_text(user):
         "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
         "⭐ PLUS — Claude Sonnet и 500 запросов в неделю\n"
         "💎 PRO — Nano Banana Pro и 1400 запросов в неделю\n"
-        "👑 VIP — Sora GPT Image и безлимит"
+        "👑 VIP — GPT Image и безлимит"
     )
     return text
 
@@ -1218,6 +1233,25 @@ def short_error_text(error: Exception) -> str:
     return str(error).replace("\n", " ")[:1200]
 
 
+_BOT_ME_CACHE = {"value": None, "expires_at": 0.0}
+
+# Temporary in-memory storage: user sends a photo first, then sends a text prompt.
+# This avoids Telegram caption limits and prevents accidental image generation.
+PENDING_IMAGE_EDITS: dict[int, dict] = {}
+PENDING_IMAGE_EDIT_TTL_SECONDS = 20 * 60
+
+
+async def get_bot_me_cached(ttl_seconds: int = 300):
+    now = time.time()
+    cached = _BOT_ME_CACHE.get("value")
+    if cached is not None and now < float(_BOT_ME_CACHE.get("expires_at") or 0):
+        return cached
+    me = await bot.get_me()
+    _BOT_ME_CACHE["value"] = me
+    _BOT_ME_CACHE["expires_at"] = now + ttl_seconds
+    return me
+
+
 async def send_ai_error_to_admin(error_text: str):
     # По умолчанию НЕ отправляем страшные API-ошибки в Telegram.
     # Они остаются в Railway logs. Если нужно включить диагностику: ADMIN_ERROR_NOTIFICATIONS=true.
@@ -1248,7 +1282,7 @@ async def animate_thinking(message: Message, base_text: str = "Печатает 
         while True:
             await message.edit_text(states[idx % len(states)])
             idx += 1
-            await asyncio.sleep(0.55)
+            await asyncio.sleep(0.4)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1270,6 +1304,89 @@ async def finish_loading_message(wait_message: Message):
             await wait_message.delete()
         except Exception:
             pass
+
+
+def _image_to_rgb(image: Image.Image) -> Image.Image:
+    if image.mode in {"RGBA", "LA"}:
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[-1])
+        return background
+    if image.mode != "RGB":
+        return image.convert("RGB")
+    return image
+
+
+def _build_image_preview_and_hd(image_bytes: bytes, filename: str):
+    """Build a Telegram-friendly preview and a real HD file.
+
+    Preview is a light JPEG for chat UX. HD file is PNG with larger dimensions
+    where possible. This avoids sending the same source twice with no benefit.
+    """
+    image = Image.open(BytesIO(image_bytes))
+    image = ImageOps.exif_transpose(image)
+    src_w, src_h = image.size
+
+    # Chat preview: compact JPEG, max 1280px longest side.
+    preview_img = _image_to_rgb(image.copy())
+    preview_img.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+    preview_buffer = BytesIO()
+    preview_img.save(preview_buffer, format="JPEG", quality=92, optimize=True, progressive=True)
+    preview_bytes = preview_buffer.getvalue()
+
+    # HD file: preserve PNG and make the downloadable file visibly better than preview.
+    # If provider already returned a large image, keep it. If not, upscale carefully.
+    hd_img = image.copy()
+    longest_side = max(src_w, src_h)
+    target_longest = int(os.getenv("IMAGE_HD_LONGEST_SIDE", "2048"))
+    target_longest = max(1536, min(target_longest, 3072))
+
+    if longest_side < target_longest:
+        scale = target_longest / max(1, longest_side)
+        new_size = (max(1, int(src_w * scale)), max(1, int(src_h * scale)))
+        hd_img = hd_img.resize(new_size, Image.Resampling.LANCZOS)
+        # Light sharpening after upscale; avoid plastic/AI artifacts.
+        try:
+            hd_img = hd_img.filter(ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3))
+        except Exception:
+            pass
+
+    hd_buffer = BytesIO()
+    # PNG keeps Telegram document quality intact.
+    hd_img.save(hd_buffer, format="PNG", optimize=True)
+    hd_bytes = hd_buffer.getvalue()
+
+    base_name = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return preview_bytes, f"{base_name}_preview.jpg", hd_bytes, f"{base_name}_HD.png", (src_w, src_h), hd_img.size
+
+
+async def send_image_with_hd_document(message: Message, image_bytes: bytes, filename: str, caption: str = "Готово"):
+    """Send image preview + real HD document.
+
+    Photo preview keeps normal Telegram bot UX. HD document is a separate PNG
+    with larger dimensions. If HD preparation fails, the user still receives
+    the normal photo instead of an error.
+    """
+    clean_caption = (caption or "Готово").strip() or "Готово"
+
+    try:
+        preview_bytes, preview_name, hd_bytes, hd_name, src_size, hd_size = _build_image_preview_and_hd(image_bytes, filename)
+        await message.answer_photo(
+            photo=BufferedInputFile(preview_bytes, filename=preview_name),
+            caption=clean_caption[:900],
+        )
+
+        # Send HD only if it is actually different/better than preview.
+        if hd_size != src_size or len(hd_bytes) > len(preview_bytes) * 1.15:
+            await message.answer_document(
+                document=BufferedInputFile(hd_bytes, filename=hd_name),
+                caption=f"HD PNG {hd_size[0]}×{hd_size[1]}",
+            )
+    except Exception as e:
+        print(f"IMAGE SEND HD PIPELINE ERROR: {short_error_text(e)}")
+        await message.answer_photo(
+            photo=BufferedInputFile(image_bytes, filename=filename),
+            caption=clean_caption[:900],
+        )
 
 
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
@@ -1607,9 +1724,20 @@ async def set_model_callback(callback: CallbackQuery):
     except Exception:
         pass
 
+    if model in {"nanobanana", "gptimage"}:
+        model_text = (
+            f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\n"
+            "Для редактирования фото:\n"
+            "1. Сначала отправьте фото без подписи.\n"
+            "2. Затем отдельным сообщением отправьте описание изменений.\n\n"
+            "Так можно писать длинные промпты без ограничений Telegram."
+        )
+    else:
+        model_text = f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос, отправьте фото или выберите действие ниже."
+
     await bot.send_message(
         chat_id=callback.message.chat.id,
-        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос, отправьте фото или выберите действие ниже.",
+        text=model_text,
         reply_markup=main_menu(),
     )
 
@@ -1809,6 +1937,7 @@ async def refstats_handler(message: Message):
     )
 
 
+
 @dp.message(Command("health"))
 async def admin_health_command(message: Message):
     if not is_admin(message.from_user.id):
@@ -1817,15 +1946,48 @@ async def admin_health_command(message: Message):
     started_delta = datetime.utcnow() - STARTED_AT
     uptime_seconds = int(started_delta.total_seconds())
     uptime_text = f"{uptime_seconds // 3600}ч {(uptime_seconds % 3600) // 60}м"
+    runtime_mode = "WEBHOOK" if WEBHOOK_MODE else "POLLING"
 
     db_status = "❌ ERROR"
     db_latency_ms = 0
+    users_total = 0
+    users_24h = 0
+    events_24h = 0
+    ai_events_24h = 0
+    error_events_24h = 0
+    payments_24h = 0
+    latest_errors_text = "Ошибок за последние 24ч не найдено."
     try:
         start = time.perf_counter()
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            users_total = await conn.fetchval("SELECT COUNT(*) FROM users")
+            users_24h = await conn.fetchval("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours'")
+            events_24h = await conn.fetchval("SELECT COUNT(*) FROM events WHERE created_at >= NOW() - INTERVAL '24 hours'")
+            ai_events_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE created_at >= NOW() - INTERVAL '24 hours' AND event_type IN ('ai_message', 'voice_message', 'file_message', 'image_message')"
+            )
+            error_events_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE created_at >= NOW() - INTERVAL '24 hours' AND (event_type ILIKE '%error%' OR details ILIKE '%error%' OR details ILIKE '%exception%')"
+            )
+            payments_24h = await conn.fetchval("SELECT COUNT(*) FROM payments WHERE created_at >= NOW() - INTERVAL '24 hours'")
+            latest_error_rows = await conn.fetch(
+                """
+                SELECT event_type, details, created_at
+                FROM events
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                  AND (event_type ILIKE '%error%' OR details ILIKE '%error%' OR details ILIKE '%exception%')
+                ORDER BY created_at DESC
+                LIMIT 3
+                """
+            )
         db_latency_ms = round((time.perf_counter() - start) * 1000)
         db_status = "✅ OK"
+        if latest_error_rows:
+            latest_errors_text = "\n".join(
+                f"• {fmt_dt(row['created_at'])} — {row['event_type']}: {short_error_text(row['details'])[:120]}"
+                for row in latest_error_rows
+            )
     except Exception as e:
         db_status = f"❌ {short_error_text(e)[:120]}"
 
@@ -1841,7 +2003,7 @@ async def admin_health_command(message: Message):
     tavily_status = "❌ OFF"
     if TAVILY_API_KEY:
         try:
-            test_results = await search_web("OpenAI latest news")
+            test_results = await search_web("latest technology news")
             tavily_status = "✅ ON / search OK" if test_results else "⚠️ KEY SET / no results"
         except Exception as e:
             tavily_status = f"❌ ERROR: {short_error_text(e)[:90]}"
@@ -1851,21 +2013,33 @@ async def admin_health_command(message: Message):
     redis_status = "✅ OK" if redis_ok else f"⚠️ {redis_details}"
 
     await message.answer(
-        "🩺 VSotahBot Health\n\n"
+        "🩺 VSotahBot Health 3.0\n\n"
+        f"Mode: {runtime_mode}\n"
         f"Bot API: {bot_status}\n"
         f"Bot: {bot_username_text}\n"
         f"PostgreSQL: {db_status}\n"
         f"DB latency: {db_latency_ms} ms\n"
         f"Uptime: {uptime_text}\n\n"
-        f"OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
-        f"Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
-        f"Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
-        f"DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
-        f"Live Web / Tavily: {tavily_status}\n"
-        f"Redis cache: {redis_status}\n"
-        f"Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
-        f"Event queue: {queue_size}\n"
-        f"Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}"
+        "🔌 Providers:\n"
+        f"• OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
+        f"• Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
+        f"• Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
+        f"• DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
+        f"• Live Web / Tavily: {tavily_status}\n\n"
+        "⚙️ Infrastructure:\n"
+        f"• Redis cache: {redis_status}\n"
+        f"• Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
+        f"• Event queue: {queue_size}\n"
+        f"• Voice replies: {'✅ ON' if VOICE_REPLY_ENABLED else '❌ OFF'}\n"
+        f"• Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}\n\n"
+        "📊 Last 24h:\n"
+        f"• Users total: {users_total}\n"
+        f"• New users: {users_24h}\n"
+        f"• Events: {events_24h}\n"
+        f"• AI events: {ai_events_24h}\n"
+        f"• Payments: {payments_24h}\n"
+        f"• Errors: {error_events_24h}\n\n"
+        f"🧯 Latest errors:\n{latest_errors_text}"
     )
 
 
@@ -2148,10 +2322,10 @@ async def photo_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT."
         )
 
-    is_image_edit = selected_model == "gptimage"
+    is_image_edit = selected_model in {"nanobanana", "gptimage"}
     if is_image_edit and not await check_free_image_limit(user):
         await log_event(message.from_user.id, "limit_reached", "FREE_IMAGE_DAY_LIMIT")
         await message.answer(
@@ -2161,28 +2335,81 @@ async def photo_handler(message: Message):
         )
         return
 
-    wait_message = await message.answer("Редактирую изображение..." if is_image_edit else "Анализирую фото...")
+    if is_image_edit:
+        try:
+            image_bytes = await download_telegram_photo(message)
+        except Exception as e:
+            await log_event(message.from_user.id, "photo_download_error", short_error_text(e))
+            await message.answer("⚠️ Не удалось сохранить фото. Попробуйте отправить его ещё раз.", reply_markup=main_menu())
+            return
+
+        PENDING_IMAGE_EDITS[message.from_user.id] = {
+            "image_bytes": image_bytes,
+            "selected_model": selected_model,
+            "created_at": time.time(),
+        }
+        await message.answer("Фото получено ✅\n\nТеперь отправьте описание изменений")
+        return
+
+    wait_text = "Анализирую фото"
+    wait_message = await message.answer(f"{wait_text}...")
+    loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
 
     try:
-        question = message.caption or ("Улучши это изображение и сохрани смысл." if is_image_edit else "Что изображено на фото?")
+        question = message.caption or ("Улучши это изображение, сохрани человека, лицо, позу и естественный вид." if is_image_edit else "Что изображено на фото?")
         image_bytes = await download_telegram_photo(message)
 
         if is_image_edit:
             await save_message(message.from_user.id, "user", f"[Редактирование изображения] {question}")
-            edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
+            if selected_model == "nanobanana":
+                edited_bytes, text_note = await edit_nano_banana_image(question, image_bytes)
+            else:
+                edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
 
             if not edited_bytes:
                 print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
+                if loading_task:
+                    loading_task.cancel()
+                    try:
+                        await loading_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
 
-            photo = BufferedInputFile(edited_bytes, filename="edited_gpt_image.png")
-            await wait_message.delete()
-            await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "Готово"))
-            await save_message(message.from_user.id, "assistant", "[gptimage image edited]")
+            if loading_task:
+                loading_task.cancel()
+                try:
+                    await loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            filename = "edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png"
+            send_text = "Отправляю изображение"
+            try:
+                await wait_message.edit_text(f"{send_text}...")
+            except Exception:
+                pass
+            send_loading_task = asyncio.create_task(animate_thinking(wait_message, send_text))
+            try:
+                await send_image_with_hd_document(message, edited_bytes, filename, text_note if text_note else "Готово")
+            finally:
+                if send_loading_task:
+                    send_loading_task.cancel()
+                    try:
+                        await send_loading_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+            await finish_loading_message(wait_message)
+            await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
             await increase_image_usage(message.from_user.id)
             await log_event(message.from_user.id, "ai_image_edit", selected_model)
@@ -2199,10 +2426,14 @@ async def photo_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_vision", selected_model)
 
-        try:
-            await wait_message.edit_text("Готово")
-        except Exception:
-            pass
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2212,6 +2443,14 @@ async def photo_handler(message: Message):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
+        if 'loading_task' in locals() and loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         admin_error = short_error_text(e)
         print(f"VISION ERROR SHORT:\n{admin_error}")
         print(f"VISION ERROR TRACE:\n{traceback.format_exc()}")
@@ -2259,7 +2498,7 @@ async def document_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT."
         )
 
     wait_message = await message.answer("📎 Читаю файл...")
@@ -2314,10 +2553,14 @@ async def document_handler(message: Message):
         await increase_usage(message.from_user.id)
         await log_event(message.from_user.id, "ai_file", selected_model)
 
-        try:
-            await wait_message.edit_text("Готово")
-        except Exception:
-            pass
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         if len(answer) <= 3900:
             await wait_message.edit_text(answer)
@@ -2347,9 +2590,22 @@ async def document_handler(message: Message):
 async def send_fast_voice_reply(message: Message, answer: str):
     """Generate a short voice reply in background so text answer stays instant."""
     status_message = None
+    loading_task = None
     try:
-        status_message = await message.answer("🔊 Голосовой ответ готовится в фоне...")
+        status_message = await message.answer("🔊 Голосовой ответ готовится...")
+        loading_task = asyncio.create_task(animate_thinking(status_message, "🔊 Голосовой ответ готовится"))
+
         audio_reply = await text_to_speech(answer)
+
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
         if not audio_reply:
             if status_message:
                 await status_message.edit_text("⚠️ Не удалось подготовить голосовой ответ.")
@@ -2366,6 +2622,14 @@ async def send_fast_voice_reply(message: Message, answer: str):
                 await status_message.edit_text("✅ Голосовой ответ отправлен.")
 
     except Exception as voice_reply_error:
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         await log_event(message.from_user.id, "voice_tts_error", short_error_text(voice_reply_error))
         print(f"VOICE TTS ERROR: {short_error_text(voice_reply_error)}")
         if status_message:
@@ -2398,7 +2662,7 @@ async def voice_handler(message: Message):
         selected_model = "gpt"
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
-        await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT — GPT-4o mini.")
+        await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT.")
 
     wait_message = await message.answer("🎙 Слушаю голосовое...")
 
@@ -2502,7 +2766,7 @@ async def chat_handler(message: Message):
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer(
-            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT — GPT-4o mini."
+            "ℹ️ Ваш тариф изменился, поэтому я переключил нейросеть на ChatGPT."
         )
 
     if selected_model in {"nanobanana", "gptimage"}:
@@ -2515,31 +2779,70 @@ async def chat_handler(message: Message):
             )
             return
 
-        wait_text = "Генерирую изображение..."
-        wait_message = await message.answer(wait_text)
+        pending_edit = PENDING_IMAGE_EDITS.pop(message.from_user.id, None)
+        if pending_edit and (time.time() - float(pending_edit.get("created_at") or 0) > PENDING_IMAGE_EDIT_TTL_SECONDS):
+            pending_edit = None
+
+        wait_text = "Редактирую изображение" if pending_edit else "Генерирую изображение"
+        wait_message = await message.answer(f"{wait_text}...")
+        loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
         try:
             await save_message(message.from_user.id, "user", message.text)
 
-            if selected_model == "nanobanana":
+            if pending_edit:
+                source_image_bytes = pending_edit["image_bytes"]
+                if selected_model == "nanobanana":
+                    image_bytes, text_note = await edit_nano_banana_image(message.text, source_image_bytes)
+                else:
+                    image_bytes, text_note = await edit_gpt_image(message.text, source_image_bytes)
+            elif selected_model == "nanobanana":
                 image_bytes, text_note = await generate_nano_banana_image(message.text)
             else:
                 image_bytes, text_note = await generate_gpt_image(message.text)
 
             if not image_bytes:
                 print(f"IMAGE PROVIDER RETURNED NO IMAGE | {selected_model} | {(text_note or '')[:1000]}")
+                if loading_task:
+                    loading_task.cancel()
+                    try:
+                        await loading_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
 
+            if loading_task:
+                loading_task.cancel()
+                try:
+                    await loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
-            photo = BufferedInputFile(image_bytes, filename=filename)
-            await wait_message.delete()
-            await message.answer_photo(
-                photo=photo,
-                caption=(text_note[:900] if text_note else "Готово"),
-            )
+            send_text = "Отправляю изображение"
+            try:
+                await wait_message.edit_text(f"{send_text}...")
+            except Exception:
+                pass
+            send_loading_task = asyncio.create_task(animate_thinking(wait_message, send_text))
+            try:
+                await send_image_with_hd_document(message, image_bytes, filename, text_note if text_note else "Готово")
+            finally:
+                if send_loading_task:
+                    send_loading_task.cancel()
+                    try:
+                        await send_loading_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+            await finish_loading_message(wait_message)
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
             await increase_usage(message.from_user.id)
@@ -2548,6 +2851,14 @@ async def chat_handler(message: Message):
             return
 
         except Exception as e:
+            if 'loading_task' in locals() and loading_task:
+                loading_task.cancel()
+                try:
+                    await loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             admin_error = short_error_text(e)
             print(f"IMAGE ERROR SHORT:\n{admin_error}")
             print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
