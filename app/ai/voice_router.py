@@ -73,7 +73,10 @@ async def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> s
 
     response = await openai_client.audio.transcriptions.create(**kwargs)
 
-    text = _safe_text(getattr(response, "text", ""))
+    if isinstance(response, dict):
+        text = _safe_text(response.get("text", ""))
+    else:
+        text = _safe_text(getattr(response, "text", ""))
     return _clip_text(text, VOICE_TRANSCRIPT_LIMIT)
 
 
