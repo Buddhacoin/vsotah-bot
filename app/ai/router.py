@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Callable, Coroutine
@@ -66,6 +67,16 @@ BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
 RESEARCH_MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS", "1800"))
 BUSINESS_MAX_TOKENS = int(os.getenv("BUSINESS_MAX_TOKENS", "1600"))
 CODE_MAX_TOKENS = int(os.getenv("CODE_MAX_TOKENS", "1800"))
+
+# Router 3.0 controls. All values can be changed in Railway Variables.
+AI_ROUTER_DEBUG = os.getenv("AI_ROUTER_DEBUG", "true").lower() in {"1", "true", "yes", "on"}
+AI_ROUTER_RETRY_ATTEMPTS = max(1, int(os.getenv("AI_ROUTER_RETRY_ATTEMPTS", "2")))
+AI_ROUTER_PROVIDER_TIMEOUT_SECONDS = int(os.getenv("AI_ROUTER_PROVIDER_TIMEOUT_SECONDS", str(AI_TIMEOUT_SECONDS)))
+AI_ROUTER_FAST_TIMEOUT_SECONDS = int(os.getenv("AI_ROUTER_FAST_TIMEOUT_SECONDS", "35"))
+AI_ROUTER_VISION_TIMEOUT_SECONDS = int(os.getenv("AI_ROUTER_VISION_TIMEOUT_SECONDS", str(AI_TIMEOUT_SECONDS)))
+AI_ROUTER_FALLBACK_ENABLED = os.getenv("AI_ROUTER_FALLBACK_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+AI_ROUTER_PROVIDER_ORDER_TEXT = os.getenv("AI_ROUTER_PROVIDER_ORDER_TEXT", "").strip()
+AI_ROUTER_PROVIDER_ORDER_VISION = os.getenv("AI_ROUTER_PROVIDER_ORDER_VISION", "").strip()
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
@@ -1055,7 +1066,7 @@ def selected_model_profile_instruction(selected_model: str) -> str:
 
 
 def provider_health_config() -> dict[str, bool]:
-    """Helper for router-level provider availability."""
+    """Router-level provider availability without paid health probes."""
     return {
         "openai": bool(openai_client),
         "anthropic": bool(anthropic_client),
@@ -1064,16 +1075,33 @@ def provider_health_config() -> dict[str, bool]:
         "web": web_is_configured(),
     }
 
-def provider_order(selected_model: str, task: str = "text") -> list[str]:
-    """Real Model Router 3.0.
 
-    The first provider is the real selected provider:
-    ChatGPT -> OpenAI, Claude -> Anthropic, Gemini -> Google, DeepSeek -> DeepSeek.
-    Fallbacks are used only if the primary provider is unavailable or fails.
+def _parse_provider_order(raw: str) -> list[str]:
+    providers = []
+    for item in (raw or "").replace(";", ",").split(","):
+        provider = item.strip().lower()
+        if provider in {"openai", "anthropic", "gemini", "deepseek"} and provider not in providers:
+            providers.append(provider)
+    return providers
+
+
+def provider_order(selected_model: str, task: str = "text") -> list[str]:
+    """Real Model Router 3.0 provider order.
+
+    The first provider matches the user's selected model. Fallbacks are used only
+    when the primary provider is unavailable, times out, rate-limits, or returns
+    an empty/error response. This keeps the UX alive without sending new menu
+    messages or exposing internal provider errors to users.
     """
     selected_model = (selected_model or "gpt").lower()
+    task = (task or "text").lower()
 
-    if task == "vision":
+    env_order = _parse_provider_order(
+        AI_ROUTER_PROVIDER_ORDER_VISION if task == "vision" else AI_ROUTER_PROVIDER_ORDER_TEXT
+    )
+    if env_order:
+        order = env_order
+    elif task == "vision":
         orders = {
             "gpt": ["openai", "gemini", "anthropic"],
             "claude": ["anthropic", "openai", "gemini"],
@@ -1083,16 +1111,49 @@ def provider_order(selected_model: str, task: str = "text") -> list[str]:
         order = orders.get(selected_model, ["openai", "gemini", "anthropic"])
     else:
         orders = {
-            "gpt": ["openai", "gemini", "anthropic", "deepseek"],
+            "gpt": ["openai", "anthropic", "gemini", "deepseek"],
             "claude": ["anthropic", "openai", "gemini", "deepseek"],
             "gemini": ["gemini", "openai", "anthropic", "deepseek"],
-            "deepseek": ["deepseek", "openai", "gemini", "anthropic"],
+            "deepseek": ["deepseek", "openai", "anthropic", "gemini"],
         }
-        order = orders.get(selected_model, ["openai", "gemini", "anthropic", "deepseek"])
+        order = orders.get(selected_model, ["openai", "anthropic", "gemini", "deepseek"])
 
     available = provider_health_config()
     filtered = [provider for provider in order if available.get(provider, False)]
-    return filtered or order
+    if not AI_ROUTER_FALLBACK_ENABLED and filtered:
+        return filtered[:1]
+    return filtered or order[:1]
+
+
+def router_status(selected_model: str = "gpt", task: str = "text") -> dict[str, Any]:
+    """Small status payload for /health and future admin screens."""
+    return {
+        "version": REAL_MODEL_ROUTER_VERSION,
+        "fallback_enabled": AI_ROUTER_FALLBACK_ENABLED,
+        "retry_attempts": AI_ROUTER_RETRY_ATTEMPTS,
+        "timeout_seconds": AI_ROUTER_PROVIDER_TIMEOUT_SECONDS,
+        "providers": provider_health_config(),
+        "order": provider_order(selected_model, task),
+    }
+
+
+def _is_retryable_provider_error(error: Exception) -> bool:
+    text = short_error_text(error).lower()
+    retry_markers = (
+        "timeout", "timed out", "temporarily", "temporary", "try again", "rate limit",
+        "ratelimit", "429", "500", "502", "503", "504", "overloaded", "service unavailable",
+        "connection", "connect", "read error", "server disconnected",
+    )
+    return isinstance(error, (asyncio.TimeoutError, aiohttp.ClientError)) or any(marker in text for marker in retry_markers)
+
+
+def _provider_timeout(task_name: str) -> int:
+    name = (task_name or "").lower()
+    if name.startswith("vision:"):
+        return AI_ROUTER_VISION_TIMEOUT_SECONDS
+    if name.startswith(("chat:", "business:")):
+        return min(AI_ROUTER_PROVIDER_TIMEOUT_SECONDS, AI_ROUTER_FAST_TIMEOUT_SECONDS)
+    return AI_ROUTER_PROVIDER_TIMEOUT_SECONDS
 
 
 async def run_with_fallback(
@@ -1100,25 +1161,45 @@ async def run_with_fallback(
     calls: dict[str, Callable[[], Coroutine[Any, Any, str]]],
     task_name: str,
 ) -> str:
-    errors: list[str] = []
+    """Run providers in order with safe retry + fallback.
 
-    for provider in providers:
+    User-facing behavior stays clean: internal errors are logged, while the user
+    sees either the final answer or one friendly retry-later message.
+    """
+    errors: list[str] = []
+    timeout = _provider_timeout(task_name)
+
+    for index, provider in enumerate(providers):
         call = calls.get(provider)
         if not call:
             continue
-        try:
-            result = await asyncio.wait_for(call(), timeout=AI_TIMEOUT_SECONDS)
-            result = clean_ai_answer(_safe_text(result))
-            if result:
-                if errors:
-                    print(f"AI ROUTER FALLBACK OK | task={task_name} | provider={provider} | previous={'; '.join(errors)}")
-                return result
-            errors.append(f"{provider}: empty response")
-        except ProviderUnavailable as e:
-            errors.append(f"{provider}: {short_error_text(e)}")
-        except Exception as e:
-            errors.append(f"{provider}: {short_error_text(e)}")
-            print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | {short_error_text(e)}")
+
+        attempts = AI_ROUTER_RETRY_ATTEMPTS if index == 0 else 1
+        for attempt in range(1, attempts + 1):
+            started = time.perf_counter()
+            try:
+                result = await asyncio.wait_for(call(), timeout=timeout)
+                elapsed_ms = round((time.perf_counter() - started) * 1000)
+                result = clean_ai_answer(_safe_text(result))
+                if result:
+                    if AI_ROUTER_DEBUG:
+                        fallback_note = " fallback" if index > 0 or errors else ""
+                        print(f"AI ROUTER OK{fallback_note} | task={task_name} | provider={provider} | attempt={attempt} | {elapsed_ms}ms")
+                    return result
+                errors.append(f"{provider}: empty response")
+                break
+            except ProviderUnavailable as e:
+                errors.append(f"{provider}: {short_error_text(e)}")
+                break
+            except Exception as e:
+                elapsed_ms = round((time.perf_counter() - started) * 1000)
+                error_text = short_error_text(e)
+                errors.append(f"{provider}: {error_text}")
+                print(f"AI ROUTER PROVIDER ERROR | task={task_name} | provider={provider} | attempt={attempt} | {elapsed_ms}ms | {error_text}")
+                if attempt < attempts and _is_retryable_provider_error(e):
+                    await asyncio.sleep(0.35 * attempt)
+                    continue
+                break
 
     print(f"AI ROUTER ALL FAILED | task={task_name} | {'; '.join(errors)}")
     return (
