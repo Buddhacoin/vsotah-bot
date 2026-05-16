@@ -2273,9 +2273,21 @@ async def photo_handler(message: Message):
                     pass
                 except Exception:
                     pass
-            photo = BufferedInputFile(edited_bytes, filename="edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png")
+            filename = "edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png"
+            photo = BufferedInputFile(edited_bytes, filename=filename)
+            hd_document = BufferedInputFile(edited_bytes, filename=filename)
+
             await wait_message.delete()
-            await message.answer_photo(photo=photo, caption=(text_note[:900] if text_note else "Готово"))
+
+            await message.answer_photo(
+                photo=photo,
+                caption=(text_note[:900] if text_note else "Готово")
+            )
+
+            await message.answer_document(
+                document=hd_document,
+                caption="HD-версия"
+            )
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
             await increase_image_usage(message.from_user.id)
