@@ -2648,10 +2648,11 @@ async def send_fast_voice_reply(message: Message, answer: str):
 
 @dp.message(F.voice | F.audio)
 async def voice_handler(message: Message):
-    """Voice AI 2.1: STT + text answer + optional voice answer.
+    """Voice AI 2.0: free voice assistant for all users.
 
     Voice messages do not consume daily/weekly request limits.
-    The loading bubble uses live dots during download, recognition and answer generation.
+    Text answer is always returned; voice reply is enabled by default and can be disabled
+    with VOICE_REPLY_ENABLED=false in Railway Variables.
     """
     user = await get_or_create_user(message)
     spam_allowed, wait_seconds = await check_spam(message.from_user.id)
@@ -2670,27 +2671,14 @@ async def voice_handler(message: Message):
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT.")
 
-    wait_message = await message.answer("🎙 Слушаю аудио...")
+    wait_message = await message.answer("🎧 Распознаю речь...")
     loading_task = asyncio.create_task(animate_thinking(wait_message, "🎧 Распознаю речь"))
-
-    async def stop_loading():
-        nonlocal loading_task
-        if loading_task:
-            loading_task.cancel()
-            try:
-                await loading_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            loading_task = None
 
     try:
         filename, audio_bytes = await download_telegram_voice(message)
         transcript = await transcribe_voice(audio_bytes, filename)
 
         if not transcript:
-            await stop_loading()
             await wait_message.edit_text(
                 "⚠️ Не удалось распознать аудио. Попробуйте записать ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
@@ -2700,13 +2688,16 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
         history = await get_chat_history(message.from_user.id)
 
-        await stop_loading()
+        loading_task.cancel()
         try:
-            await wait_message.edit_text("Печатает ответ...")
+            await loading_task
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
-        loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
 
+        await wait_message.edit_text("Печатает ответ...")
+        loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
         answer = await ai_router(selected_model, history)
 
         if not answer:
@@ -2715,7 +2706,13 @@ async def voice_handler(message: Message):
         await save_message(message.from_user.id, "assistant", answer)
         await log_event(message.from_user.id, "ai_voice_free", selected_model)
 
-        await stop_loading()
+        loading_task.cancel()
+        try:
+            await loading_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
         await finish_loading_message(wait_message)
 
         # Пользователю не нужен технический блок "Распознал / Ответ".
@@ -2734,7 +2731,14 @@ async def voice_handler(message: Message):
             asyncio.create_task(send_fast_voice_reply(message, answer))
 
     except ValueError as e:
-        await stop_loading()
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         error_code = str(e)
         if error_code == "VOICE_TOO_LARGE":
             await wait_message.edit_text("⚠️ Аудио слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
@@ -2742,7 +2746,14 @@ async def voice_handler(message: Message):
             await wait_message.edit_text("⚠️ Не удалось скачать аудио. Попробуйте ещё раз.", reply_markup=main_menu())
 
     except Exception as e:
-        await stop_loading()
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         admin_error = short_error_text(e)
         print(f"VOICE ERROR SHORT:\n{admin_error}")
         print(f"VOICE ERROR TRACE:\n{traceback.format_exc()}")
