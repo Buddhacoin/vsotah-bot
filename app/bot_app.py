@@ -1304,19 +1304,53 @@ async def finish_loading_message(wait_message: Message):
             pass
 
 
-async def send_image_with_hd_document(message: Message, image_bytes: bytes, filename: str, caption: str = "Готово"):
-    """Send image as normal chat preview + original file.
+def build_photo_edit_prompt(user_prompt: str) -> str:
+    """Strengthen photo-edit prompts so image models preserve identity.
 
-    Telegram compresses images sent as photos. The first message keeps the
-    familiar bot UX; the second preserves the original PNG/JPEG quality for
-    download and posting elsewhere.
+    This is especially important for portrait enhancement: users expect better
+    quality, not a new face or a different person.
+    """
+    prompt = (user_prompt or "").strip()
+    preserve_identity = (
+        "Важно: если на изображении есть человек, сохрани личность, лицо, "
+        "возраст, мимику, позу, одежду, композицию и фон. Не меняй человека "
+        "на другого. Улучшай качество аккуратно: резкость, свет, детализацию, "
+        "цвет, шум, кожу и общий реализм. Не возвращай исходник без заметного "
+        "улучшения. "
+    )
+    return preserve_identity + prompt
+
+
+async def send_image_with_hd_document(message: Message, image_bytes: bytes, filename: str, caption: str = "Готово"):
+    """Send image as chat preview and try to attach original as HD file.
+
+    The preview keeps normal Telegram UX. The document is best-effort: if
+    Telegram refuses it for any reason, the user still gets the generated image.
     """
     clean_caption = (caption or "Готово").strip() or "Готово"
-    preview_file = BufferedInputFile(image_bytes, filename=filename)
-    original_file = BufferedInputFile(image_bytes, filename=filename)
+    if len(clean_caption) > 900:
+        clean_caption = clean_caption[:897].rstrip() + "..."
 
-    await message.answer_photo(photo=preview_file, caption=clean_caption[:900])
-    await message.answer_document(document=original_file, caption="HD-версия")
+    photo_sent = False
+    document_sent = False
+    last_error = None
+
+    try:
+        preview_file = BufferedInputFile(image_bytes, filename=filename)
+        await message.answer_photo(photo=preview_file, caption=clean_caption)
+        photo_sent = True
+    except Exception as e:
+        last_error = e
+
+    try:
+        original_file = BufferedInputFile(image_bytes, filename=filename)
+        await message.answer_document(document=original_file, caption="HD-версия")
+        document_sent = True
+    except Exception as e:
+        last_error = e
+
+    if not photo_sent and not document_sent:
+        raise last_error or RuntimeError("image_send_failed")
 
 
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
@@ -2291,10 +2325,11 @@ async def photo_handler(message: Message):
 
         if is_image_edit:
             await save_message(message.from_user.id, "user", f"[Редактирование изображения] {question}")
+            edit_prompt = build_photo_edit_prompt(question)
             if selected_model == "nanobanana":
-                edited_bytes, text_note = await edit_nano_banana_image(question, image_bytes)
+                edited_bytes, text_note = await edit_nano_banana_image(edit_prompt, image_bytes)
             else:
-                edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
+                edited_bytes, text_note = await edit_gpt_image(edit_prompt, image_bytes)
 
             if not edited_bytes:
                 print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
@@ -2325,7 +2360,17 @@ async def photo_handler(message: Message):
                 await wait_message.edit_text("Отправляю изображение...")
             except Exception:
                 pass
-            await send_image_with_hd_document(message, edited_bytes, filename, text_note if text_note else "Готово")
+            send_loading_task = asyncio.create_task(animate_thinking(wait_message, "Отправляю изображение"))
+            try:
+                await send_image_with_hd_document(message, edited_bytes, filename, text_note if text_note else "Готово")
+            finally:
+                send_loading_task.cancel()
+                try:
+                    await send_loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             await finish_loading_message(wait_message)
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
@@ -2709,10 +2754,11 @@ async def chat_handler(message: Message):
 
             if pending_edit:
                 source_image_bytes = pending_edit["image_bytes"]
+                edit_prompt = build_photo_edit_prompt(message.text)
                 if selected_model == "nanobanana":
-                    image_bytes, text_note = await edit_nano_banana_image(message.text, source_image_bytes)
+                    image_bytes, text_note = await edit_nano_banana_image(edit_prompt, source_image_bytes)
                 else:
-                    image_bytes, text_note = await edit_gpt_image(message.text, source_image_bytes)
+                    image_bytes, text_note = await edit_gpt_image(edit_prompt, source_image_bytes)
             elif selected_model == "nanobanana":
                 image_bytes, text_note = await generate_nano_banana_image(message.text)
             else:
@@ -2743,11 +2789,22 @@ async def chat_handler(message: Message):
                 except Exception:
                     pass
             filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
+
             try:
                 await wait_message.edit_text("Отправляю изображение...")
             except Exception:
                 pass
-            await send_image_with_hd_document(message, image_bytes, filename, text_note if text_note else "Готово")
+            send_loading_task = asyncio.create_task(animate_thinking(wait_message, "Отправляю изображение"))
+            try:
+                await send_image_with_hd_document(message, image_bytes, filename, text_note if text_note else "Готово")
+            finally:
+                send_loading_task.cancel()
+                try:
+                    await send_loading_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             await finish_loading_message(wait_message)
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
