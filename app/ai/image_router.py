@@ -109,16 +109,23 @@ def infer_aspect_ratio(prompt: str | None, kind: ImageKind | None = None) -> str
     text = _lower(prompt)
     kind = kind or detect_image_kind(prompt)
 
-    if _has_any(text, ["640x360", "16:9", "ютуб", "youtube", "баннер", "thumbnail", "превью"]):
+    # Explicit formats first.
+    if _has_any(text, ["640x360", "16:9", "ютуб", "youtube", "баннер", "thumbnail", "превью", "обложка youtube"]):
         return "16:9"
-    if _has_any(text, ["9:16", "сторис", "story", "reels", "shorts", "вертикаль", "вертикальная"]):
+    if _has_any(text, ["9:16", "сторис", "stories", "story", "reels", "рилс", "shorts", "тикток", "tiktok", "вертикаль", "вертикальная"]):
         return "9:16"
-    if _has_any(text, ["4:3", "презентац", "presentation"]):
+    if _has_any(text, ["4:3", "презентац", "presentation", "слайд"]):
         return "4:3"
-    if _has_any(text, ["3:4", "портрет", "portrait"]):
+    if _has_any(text, ["3:4", "портрет", "portrait", "вертикальный пост", "портретный пост"]):
         return "3:4"
     if _has_any(text, ["квадрат", "square", "1:1", "аватар", "ава"]):
         return "1:1"
+
+    # Instagram is not always square. Default feed posts look better as portrait.
+    if _has_any(text, ["instagram", "инстаграм", "инста", "insta"]):
+        if _has_any(text, ["пост", "лента", "feed", "publication", "рекламный креатив"]):
+            return "3:4"
+        return "9:16"
 
     defaults = {
         "avatar": "1:1",
@@ -129,8 +136,8 @@ def infer_aspect_ratio(prompt: str | None, kind: ImageKind | None = None) -> str
         "wallpaper": "16:9",
         "product": "1:1",
         "meme": "1:1",
-        "document": "1:1",
-        "photo": "1:1",
+        "document": "3:4",
+        "photo": "3:4",
         "art": "1:1",
         "unknown": "1:1",
     }
@@ -138,12 +145,33 @@ def infer_aspect_ratio(prompt: str | None, kind: ImageKind | None = None) -> str
 
 
 def infer_openai_image_size(prompt: str | None) -> str:
+    """Map flexible user formats to sizes supported by GPT Image.
+
+    OpenAI image sizes are limited, so 3:4 / Instagram portrait uses the
+    closest vertical HD canvas. The prompt itself tells the model to keep safe
+    Instagram framing inside that canvas.
+    """
     ratio = infer_aspect_ratio(prompt)
     if ratio == "16:9":
         return "1536x1024"
-    if ratio == "9:16":
+    if ratio in {"9:16", "3:4"}:
         return "1024x1536"
     return "1024x1024"
+
+
+def infer_openai_image_quality(prompt: str | None, has_source_image: bool = False) -> str:
+    """Balanced speed/quality.
+
+    High quality is reserved for enhancement/upscale/logo/avatar/photo-edit
+    requests. Regular random generations stay medium so GPT Image does not take
+    several minutes for every casual prompt.
+    """
+    text = _lower(prompt)
+    if has_source_image:
+        return "high"
+    if _has_any(text, ["hd", "4k", "качество", "улучши", "улучшить", "upscale", "апскейл", "логотип", "лого", "avatar", "аватар", "фото", "realistic", "реалист"]):
+        return "high"
+    return "medium"
 
 
 def infer_gemini_aspect_ratio(prompt: str | None) -> str:
@@ -197,6 +225,7 @@ def build_image_generation_prompt(user_prompt: str | None, image_model: str = "i
         f"Image model: {image_model}\n"
         f"Detected type: {plan.kind}\n"
         f"Target aspect ratio: {plan.aspect_ratio}\n"
+        "Use the requested aspect ratio deliberately. For Instagram/feed posts, keep the subject inside safe margins and avoid forced square composition unless requested.\n"
         f"Quality direction: {plan.quality_notes}\n"
         f"Rules: {plan.safety_notes}\n\n"
         "Create one polished final image. The result must match the user's request literally. Avoid visual clutter and random text."
