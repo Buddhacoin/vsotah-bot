@@ -1654,9 +1654,20 @@ async def set_model_callback(callback: CallbackQuery):
     except Exception:
         pass
 
+    if model in {"nanobanana", "gptimage"}:
+        model_text = (
+            f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\n"
+            "Для редактирования фото:\n"
+            "1. Сначала отправьте фото без подписи.\n"
+            "2. Затем отдельным сообщением отправьте описание изменений.\n\n"
+            "Так можно писать длинные промпты без ограничений Telegram."
+        )
+    else:
+        model_text = f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос, отправьте фото или выберите действие ниже."
+
     await bot.send_message(
         chat_id=callback.message.chat.id,
-        text=f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос, отправьте фото или выберите действие ниже.",
+        text=model_text,
         reply_markup=main_menu(),
     )
 
@@ -2310,8 +2321,12 @@ async def photo_handler(message: Message):
                 except Exception:
                     pass
             filename = "edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png"
-            await finish_loading_message(wait_message)
+            try:
+                await wait_message.edit_text("Отправляю изображение...")
+            except Exception:
+                pass
             await send_image_with_hd_document(message, edited_bytes, filename, text_note if text_note else "Готово")
+            await finish_loading_message(wait_message)
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
             await increase_image_usage(message.from_user.id)
@@ -2728,8 +2743,12 @@ async def chat_handler(message: Message):
                 except Exception:
                     pass
             filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
-            await finish_loading_message(wait_message)
+            try:
+                await wait_message.edit_text("Отправляю изображение...")
+            except Exception:
+                pass
             await send_image_with_hd_document(message, image_bytes, filename, text_note if text_note else "Готово")
+            await finish_loading_message(wait_message)
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
             await increase_usage(message.from_user.id)
