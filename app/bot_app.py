@@ -1360,13 +1360,51 @@ def _build_image_preview_and_hd(image_bytes: bytes, filename: str):
 
 
 async def send_image_with_hd_document(message: Message, image_bytes: bytes, filename: str, caption: str = "Готово"):
-    """Send original image from provider without fake HD/upscale/document duplicates."""
-    clean_caption = (caption or "Готово").strip() or "Готово"
+    """Send only the original image returned by the provider as Telegram photo.
 
+    No fake upscale, no sharpening, no HD document duplicate.
+    The function name is kept for compatibility with existing call sites.
+    """
+    clean_caption = (caption or "Готово").strip() or "Готово"
     await message.answer_photo(
         photo=BufferedInputFile(image_bytes, filename=filename),
         caption=clean_caption[:900],
     )
+
+
+async def call_image_provider_with_retry(provider_name: str, operation: str, func, *args):
+    """Call image provider with one quick retry for intermittent API failures.
+
+    This does not change model quality or post-process the image. It only avoids
+    random empty responses/timeouts becoming an immediate user-facing failure.
+    """
+    last_note = ""
+    last_error = ""
+
+    for attempt in range(1, 3):
+        try:
+            image_bytes, text_note = await func(*args)
+            if image_bytes:
+                if attempt > 1:
+                    print(f"IMAGE PROVIDER RECOVERED | {provider_name} | {operation} | attempt={attempt}")
+                return image_bytes, text_note
+
+            last_note = text_note or ""
+            print(
+                f"IMAGE PROVIDER EMPTY RESULT | {provider_name} | {operation} | "
+                f"attempt={attempt} | note={(last_note or '')[:1000]}"
+            )
+        except Exception as e:
+            last_error = short_error_text(e)
+            print(
+                f"IMAGE PROVIDER EXCEPTION | {provider_name} | {operation} | "
+                f"attempt={attempt} | {last_error}"
+            )
+
+        if attempt == 1:
+            await asyncio.sleep(1.2)
+
+    return None, last_note or last_error
 
 
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
@@ -2342,9 +2380,9 @@ async def photo_handler(message: Message):
         if is_image_edit:
             await save_message(message.from_user.id, "user", f"[Редактирование изображения] {question}")
             if selected_model == "nanobanana":
-                edited_bytes, text_note = await edit_nano_banana_image(question, image_bytes)
+                edited_bytes, text_note = await call_image_provider_with_retry("nanobanana", "edit_photo_caption", edit_nano_banana_image, question, image_bytes)
             else:
-                edited_bytes, text_note = await edit_gpt_image(question, image_bytes)
+                edited_bytes, text_note = await call_image_provider_with_retry("gptimage", "edit_photo_caption", edit_gpt_image, question, image_bytes)
 
             if not edited_bytes:
                 print(f"IMAGE EDIT RETURNED NO IMAGE | {(text_note or '')[:1000]}")
@@ -2772,13 +2810,13 @@ async def chat_handler(message: Message):
             if pending_edit:
                 source_image_bytes = pending_edit["image_bytes"]
                 if selected_model == "nanobanana":
-                    image_bytes, text_note = await edit_nano_banana_image(message.text, source_image_bytes)
+                    image_bytes, text_note = await call_image_provider_with_retry("nanobanana", "edit_photo_prompt", edit_nano_banana_image, message.text, source_image_bytes)
                 else:
-                    image_bytes, text_note = await edit_gpt_image(message.text, source_image_bytes)
+                    image_bytes, text_note = await call_image_provider_with_retry("gptimage", "edit_photo_prompt", edit_gpt_image, message.text, source_image_bytes)
             elif selected_model == "nanobanana":
-                image_bytes, text_note = await generate_nano_banana_image(message.text)
+                image_bytes, text_note = await call_image_provider_with_retry("nanobanana", "generate", generate_nano_banana_image, message.text)
             else:
-                image_bytes, text_note = await generate_gpt_image(message.text)
+                image_bytes, text_note = await call_image_provider_with_retry("gptimage", "generate", generate_gpt_image, message.text)
 
             if not image_bytes:
                 print(f"IMAGE PROVIDER RETURNED NO IMAGE | {selected_model} | {(text_note or '')[:1000]}")
