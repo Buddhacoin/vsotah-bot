@@ -1,4 +1,5 @@
 import asyncio
+import mimetypes
 import os
 from io import BytesIO
 from typing import Any
@@ -13,7 +14,7 @@ OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "nova")
 OPENAI_TTS_FORMAT = os.getenv("OPENAI_TTS_FORMAT", "opus")
 VOICE_TRANSCRIPT_LIMIT = int(os.getenv("VOICE_TRANSCRIPT_LIMIT", "5000"))
-VOICE_STT_TIMEOUT_SECONDS = int(os.getenv("VOICE_STT_TIMEOUT_SECONDS", "60"))
+VOICE_STT_TIMEOUT_SECONDS = int(os.getenv("VOICE_STT_TIMEOUT_SECONDS", "45"))
 # Voice replies must be short: Telegram users already received the full text answer.
 # Shorter TTS is much faster on Railway and uploads back to Telegram quicker.
 VOICE_TTS_TEXT_LIMIT = int(os.getenv("VOICE_TTS_TEXT_LIMIT", "700"))
@@ -54,69 +55,76 @@ def _clean_tts_text(text: str) -> str:
     return "\n".join(lines)
 
 
-def _normalize_audio_filename(filename: str | None) -> str:
-    """OpenAI STT validates file extensions, so Telegram voice must have one."""
-    name = _safe_text(filename) or "voice.ogg"
-    allowed = (".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".oga", ".ogg", ".wav", ".webm")
-    if not name.lower().endswith(allowed):
-        name = f"{name}.ogg"
-    return name
+def _safe_audio_filename(filename: str = "voice.ogg") -> str:
+    filename = (filename or "voice.ogg").strip()
+    if "." not in filename:
+        filename += ".ogg"
+    return filename
 
 
-def _stt_model_chain() -> list[str]:
-    """Try the configured STT model first, then safe OpenAI fallbacks."""
-    models = [OPENAI_STT_MODEL, "gpt-4o-mini-transcribe", "whisper-1"]
-    out: list[str] = []
-    for model in models:
-        model = _safe_text(model)
-        if model and model not in out:
-            out.append(model)
-    return out
+def _audio_mime_type(filename: str) -> str:
+    mime_type, _ = mimetypes.guess_type(filename)
+    return mime_type or "audio/ogg"
 
 
-async def _transcribe_with_model(audio_bytes: bytes, filename: str, model: str) -> str:
-    audio_file = BytesIO(audio_bytes)
-    audio_file.name = filename
-
-    kwargs = {
-        "model": model,
-        "file": audio_file,
-    }
-    # Empty language means automatic language detection. Set OPENAI_STT_LANGUAGE=ru
-    # in Railway if you want to force Russian-only recognition.
-    if OPENAI_STT_LANGUAGE:
-        kwargs["language"] = OPENAI_STT_LANGUAGE
-
-    response = await asyncio.wait_for(
-        openai_client.audio.transcriptions.create(**kwargs),
-        timeout=VOICE_STT_TIMEOUT_SECONDS,
-    )
-
-    if isinstance(response, dict):
-        text = _safe_text(response.get("text", ""))
-    else:
-        text = _safe_text(getattr(response, "text", ""))
-    return _clip_text(text, VOICE_TRANSCRIPT_LIMIT)
+def _stt_models_to_try() -> list[str]:
+    # OPENAI_STT_MODEL is configurable, then we keep two safe fallbacks.
+    # This is intentionally independent from the chat model GPT-5.
+    candidates = [
+        OPENAI_STT_MODEL,
+        "gpt-4o-mini-transcribe",
+        "whisper-1",
+    ]
+    result = []
+    for model in candidates:
+        model = (model or "").strip()
+        if model and model not in result:
+            result.append(model)
+    return result
 
 
 async def transcribe_voice(audio_bytes: bytes, filename: str = "voice.ogg") -> str:
-    """Speech-to-text for Telegram voice/audio files with model fallback."""
+    """Speech-to-text for Telegram voice/audio files.
+
+    Telegram voice notes are usually OGG/OPUS. The OpenAI SDK is more reliable
+    when we pass the file as an explicit (filename, bytes, mime_type) tuple
+    instead of a reused BytesIO object.
+    """
     if not openai_client:
         raise VoiceProviderUnavailable("OPENAI_API_KEY is missing")
     if not audio_bytes:
         return ""
 
-    safe_filename = _normalize_audio_filename(filename)
+    safe_filename = _safe_audio_filename(filename)
+    mime_type = _audio_mime_type(safe_filename)
     last_error: Exception | None = None
 
-    for model in _stt_model_chain():
+    for model in _stt_models_to_try():
+        kwargs = {
+            "model": model,
+            "file": (safe_filename, audio_bytes, mime_type),
+        }
+        # Empty language means automatic language detection. Set OPENAI_STT_LANGUAGE=ru
+        # in Railway if you want to force Russian-only recognition.
+        if OPENAI_STT_LANGUAGE:
+            kwargs["language"] = OPENAI_STT_LANGUAGE
+
         try:
-            transcript = await _transcribe_with_model(audio_bytes, safe_filename, model)
-            if transcript:
-                return transcript
+            response = await asyncio.wait_for(
+                openai_client.audio.transcriptions.create(**kwargs),
+                timeout=VOICE_STT_TIMEOUT_SECONDS,
+            )
+            if isinstance(response, str):
+                text = _safe_text(response)
+            elif isinstance(response, dict):
+                text = _safe_text(response.get("text", ""))
+            else:
+                text = _safe_text(getattr(response, "text", ""))
+            if text:
+                return _clip_text(text, VOICE_TRANSCRIPT_LIMIT)
         except Exception as error:
             last_error = error
-            print(f"VOICE STT MODEL ERROR | {model}: {str(error).replace(chr(10), ' ')[:500]}")
+            print(f"VOICE STT MODEL ERROR | {model}: {type(error).__name__}: {str(error)[:500]}")
             continue
 
     if last_error:
