@@ -1360,33 +1360,13 @@ def _build_image_preview_and_hd(image_bytes: bytes, filename: str):
 
 
 async def send_image_with_hd_document(message: Message, image_bytes: bytes, filename: str, caption: str = "Готово"):
-    """Send image preview + real HD document.
-
-    Photo preview keeps normal Telegram bot UX. HD document is a separate PNG
-    with larger dimensions. If HD preparation fails, the user still receives
-    the normal photo instead of an error.
-    """
+    """Send original image from provider without fake HD/upscale/document duplicates."""
     clean_caption = (caption or "Готово").strip() or "Готово"
 
-    try:
-        preview_bytes, preview_name, hd_bytes, hd_name, src_size, hd_size = _build_image_preview_and_hd(image_bytes, filename)
-        await message.answer_photo(
-            photo=BufferedInputFile(preview_bytes, filename=preview_name),
-            caption=clean_caption[:900],
-        )
-
-        # Send HD only if it is actually different/better than preview.
-        if hd_size != src_size or len(hd_bytes) > len(preview_bytes) * 1.15:
-            await message.answer_document(
-                document=BufferedInputFile(hd_bytes, filename=hd_name),
-                caption=f"HD PNG {hd_size[0]}×{hd_size[1]}",
-            )
-    except Exception as e:
-        print(f"IMAGE SEND HD PIPELINE ERROR: {short_error_text(e)}")
-        await message.answer_photo(
-            photo=BufferedInputFile(image_bytes, filename=filename),
-            caption=clean_caption[:900],
-        )
+    await message.answer_photo(
+        photo=BufferedInputFile(image_bytes, filename=filename),
+        caption=clean_caption[:900],
+    )
 
 
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
