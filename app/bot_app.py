@@ -1233,6 +1233,11 @@ def short_error_text(error: Exception) -> str:
 
 _BOT_ME_CACHE = {"value": None, "expires_at": 0.0}
 
+# Temporary in-memory storage: user sends a photo first, then sends a text prompt.
+# This avoids Telegram caption limits and prevents accidental image generation.
+PENDING_IMAGE_EDITS: dict[int, dict] = {}
+PENDING_IMAGE_EDIT_TTL_SECONDS = 20 * 60
+
 
 async def get_bot_me_cached(ttl_seconds: int = 300):
     now = time.time()
@@ -2249,7 +2254,23 @@ async def photo_handler(message: Message):
         )
         return
 
-    wait_text = "Редактирую изображение" if is_image_edit else "Анализирую фото"
+    if is_image_edit:
+        try:
+            image_bytes = await download_telegram_photo(message)
+        except Exception as e:
+            await log_event(message.from_user.id, "photo_download_error", short_error_text(e))
+            await message.answer("⚠️ Не удалось сохранить фото. Попробуйте отправить его ещё раз.", reply_markup=main_menu())
+            return
+
+        PENDING_IMAGE_EDITS[message.from_user.id] = {
+            "image_bytes": image_bytes,
+            "selected_model": selected_model,
+            "created_at": time.time(),
+        }
+        await message.answer("Фото получено ✅\n\nТеперь отправьте описание изменений")
+        return
+
+    wait_text = "Анализирую фото"
     wait_message = await message.answer(f"{wait_text}...")
     loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
 
@@ -2661,13 +2682,23 @@ async def chat_handler(message: Message):
             )
             return
 
-        wait_text = "Генерирую изображение"
+        pending_edit = PENDING_IMAGE_EDITS.pop(message.from_user.id, None)
+        if pending_edit and (time.time() - float(pending_edit.get("created_at") or 0) > PENDING_IMAGE_EDIT_TTL_SECONDS):
+            pending_edit = None
+
+        wait_text = "Редактирую изображение" if pending_edit else "Генерирую изображение"
         wait_message = await message.answer(f"{wait_text}...")
         loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
         try:
             await save_message(message.from_user.id, "user", message.text)
 
-            if selected_model == "nanobanana":
+            if pending_edit:
+                source_image_bytes = pending_edit["image_bytes"]
+                if selected_model == "nanobanana":
+                    image_bytes, text_note = await edit_nano_banana_image(message.text, source_image_bytes)
+                else:
+                    image_bytes, text_note = await edit_gpt_image(message.text, source_image_bytes)
+            elif selected_model == "nanobanana":
                 image_bytes, text_note = await generate_nano_banana_image(message.text)
             else:
                 image_bytes, text_note = await generate_gpt_image(message.text)
