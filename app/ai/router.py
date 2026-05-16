@@ -23,6 +23,7 @@ from app.ai.image_router import (
     image_result_caption,
     infer_gemini_aspect_ratio,
     infer_openai_image_size,
+    infer_openai_image_quality,
 )
 from app.ai.vision_router import build_vision_prompt, build_pdf_vision_prompt
 
@@ -42,7 +43,7 @@ GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.1-flash")
 DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-v4-flash")
 NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "gemini-3-pro-image-preview")
 GPT_IMAGE_MODEL = os.getenv("GPT_IMAGE_MODEL", "gpt-image-2")
-GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "high")
+GPT_IMAGE_QUALITY = os.getenv("GPT_IMAGE_QUALITY", "auto")
 NANO_BANANA_ALLOW_LEGACY_FALLBACK = os.getenv("NANO_BANANA_ALLOW_LEGACY_FALLBACK", "false").lower() in {"1", "true", "yes", "on"}
 
 TEXT_HISTORY_LIMIT = int(os.getenv("TEXT_HISTORY_LIMIT", "10"))
@@ -1517,7 +1518,7 @@ def _decode_openai_image_item(item: Any) -> bytes | None:
     return None
 
 
-async def _run_openai_image_generate(prompt: str, size: str) -> tuple[bytes | None, str]:
+async def _run_openai_image_generate(prompt: str, size: str, quality: str | None = None) -> tuple[bytes | None, str]:
     last_error = ""
     for model in _openai_image_model_candidates():
         try:
@@ -1528,8 +1529,9 @@ async def _run_openai_image_generate(prompt: str, size: str) -> tuple[bytes | No
                 "n": 1,
             }
             # Some newer/older GPT Image models accept different quality values.
-            if GPT_IMAGE_QUALITY:
-                kwargs["quality"] = GPT_IMAGE_QUALITY
+            selected_quality = (quality or GPT_IMAGE_QUALITY or "auto").strip().lower()
+            if selected_quality and selected_quality != "auto":
+                kwargs["quality"] = selected_quality
             response = await openai_client.images.generate(**kwargs)
             image_bytes = _decode_openai_image_item(response.data[0])
             if image_bytes:
@@ -1557,19 +1559,23 @@ async def _run_openai_image_generate(prompt: str, size: str) -> tuple[bytes | No
     return None, "⚠️ GPT Image временно не смог создать изображение. Попробуйте ещё раз чуть позже."
 
 
-async def _run_openai_image_edit(prompt: str, image_bytes: bytes, size: str = "1024x1024") -> tuple[bytes | None, str]:
+async def _run_openai_image_edit(prompt: str, image_bytes: bytes, size: str = "1024x1024", quality: str | None = None) -> tuple[bytes | None, str]:
     last_error = ""
     for model in _openai_image_model_candidates():
         try:
             image_file = BytesIO(image_bytes)
             image_file.name = "input.png"
-            response = await openai_client.images.edit(
-                model=model,
-                image=image_file,
-                prompt=prompt,
-                size=size,
-                n=1,
-            )
+            kwargs = {
+                "model": model,
+                "image": image_file,
+                "prompt": prompt,
+                "size": size,
+                "n": 1,
+            }
+            selected_quality = (quality or GPT_IMAGE_QUALITY or "auto").strip().lower()
+            if selected_quality and selected_quality != "auto":
+                kwargs["quality"] = selected_quality
+            response = await openai_client.images.edit(**kwargs)
             edited_bytes = _decode_openai_image_item(response.data[0])
             if edited_bytes:
                 return edited_bytes, image_result_caption("gptimage", "edit")
@@ -1677,7 +1683,7 @@ async def generate_gpt_image(prompt: str) -> tuple[bytes | None, str]:
         return None, "⚠️ GPT Image пока не подключён."
 
     enhanced_prompt = await enhance_image_prompt(prompt, "GPT Image / OpenAI")
-    return await _run_openai_image_generate(enhanced_prompt, infer_openai_image_size(prompt))
+    return await _run_openai_image_generate(enhanced_prompt, infer_openai_image_size(prompt), infer_openai_image_quality(prompt, has_source_image=False))
 
 
 async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None, str]:
@@ -1686,7 +1692,7 @@ async def edit_gpt_image(prompt: str, image_bytes: bytes) -> tuple[bytes | None,
         return None, "⚠️ GPT Image пока не подключён."
 
     enhanced_prompt = await enhance_image_edit_prompt(prompt)
-    return await _run_openai_image_edit(enhanced_prompt, image_bytes, size="1024x1024")
+    return await _run_openai_image_edit(enhanced_prompt, image_bytes, size=infer_openai_image_size(prompt), quality=infer_openai_image_quality(prompt, has_source_image=True))
 
 
 def render_pdf_pages_to_images(file_bytes: bytes, max_pages: int = 3) -> list[bytes]:
