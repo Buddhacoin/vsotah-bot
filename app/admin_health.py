@@ -1,6 +1,8 @@
 import os
 from datetime import datetime
 
+from app.ai.router import router_status
+
 
 def _ok(value: bool) -> str:
     return "✅" if value else "❌"
@@ -19,6 +21,9 @@ async def build_admin_health_text(db_pool) -> str:
 
     webhook_mode = _enabled_env("WEBHOOK_MODE")
     redis_url = os.getenv("REDIS_URL")
+    router = router_status("gpt", "text")
+    router_providers = router.get("providers", {})
+    router_order = ", ".join(router.get("order", [])) or "нет доступных провайдеров"
 
     db_ok = False
     total_users = 0
