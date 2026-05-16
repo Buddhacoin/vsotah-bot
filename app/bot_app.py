@@ -1222,17 +1222,25 @@ async def download_telegram_document(message: Message) -> tuple[str, bytes]:
 
 
 async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
-    voice = message.voice
+    """Download Telegram voice notes and regular audio files for STT.
 
-    if not voice:
+    Telegram sends microphone messages as message.voice, but users can also
+    attach an audio file. The old handler only accepted voice notes, so audio
+    files fell into the wrong path or failed before transcription.
+    """
+    media = message.voice or message.audio
+
+    if not media:
         raise ValueError("VOICE_NOT_FOUND")
-    if voice.file_size and voice.file_size > MAX_VOICE_SIZE:
+    if media.file_size and media.file_size > MAX_VOICE_SIZE:
         raise ValueError("VOICE_TOO_LARGE")
 
-    file = await bot.get_file(voice.file_id)
+    file = await bot.get_file(media.file_id)
     buffer = BytesIO()
     await bot.download_file(file.file_path, destination=buffer)
-    return "voice.ogg", buffer.getvalue()
+
+    filename = getattr(media, "file_name", None) or "voice.ogg"
+    return filename, buffer.getvalue()
 
 
 # File extraction lives in app/ai/file_router.py.
@@ -2490,6 +2498,7 @@ async def document_handler(message: Message):
         )
 
     wait_message = await message.answer("📎 Читаю файл...")
+    loading_task = None
 
     try:
         filename, file_bytes = await download_telegram_document(message)
@@ -2532,6 +2541,7 @@ async def document_handler(message: Message):
                 return
         else:
             await wait_message.edit_text(build_file_status_text(filename, "analyzing"))
+            loading_task = asyncio.create_task(animate_thinking(wait_message, "📎 Анализирую файл"))
             answer = await file_router(selected_model, question, filename, extracted_text, history)
 
         if not answer:
@@ -2558,6 +2568,15 @@ async def document_handler(message: Message):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
         admin_error = short_error_text(e)
         print(f"FILE ERROR SHORT:\n{admin_error}")
         print(f"FILE ERROR TRACE:\n{traceback.format_exc()}")
@@ -2627,7 +2646,7 @@ async def send_fast_voice_reply(message: Message, answer: str):
                 pass
 
 
-@dp.message(F.voice)
+@dp.message(F.voice | F.audio)
 async def voice_handler(message: Message):
     """Voice AI 2.0: free voice assistant for all users.
 
@@ -2652,7 +2671,7 @@ async def voice_handler(message: Message):
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT.")
 
-    wait_message = await message.answer("🎙 Слушаю голосовое...")
+    wait_message = await message.answer("🎙 Слушаю аудио...")
 
     try:
         filename, audio_bytes = await download_telegram_voice(message)
@@ -2662,7 +2681,7 @@ async def voice_handler(message: Message):
 
         if not transcript:
             await wait_message.edit_text(
-                "⚠️ Не удалось распознать голосовое. Попробуйте записать ещё раз или отправьте текстом.",
+                "⚠️ Не удалось распознать аудио. Попробуйте записать ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
             return
@@ -2707,9 +2726,9 @@ async def voice_handler(message: Message):
     except ValueError as e:
         error_code = str(e)
         if error_code == "VOICE_TOO_LARGE":
-            await wait_message.edit_text("⚠️ Голосовое слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
+            await wait_message.edit_text("⚠️ Аудио слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
         else:
-            await wait_message.edit_text("⚠️ Не удалось скачать голосовое. Попробуйте ещё раз.", reply_markup=main_menu())
+            await wait_message.edit_text("⚠️ Не удалось скачать аудио. Попробуйте ещё раз.", reply_markup=main_menu())
 
     except Exception as e:
         admin_error = short_error_text(e)
@@ -2720,12 +2739,12 @@ async def voice_handler(message: Message):
 
         try:
             await wait_message.edit_text(
-                "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
+                "⚠️ Не удалось обработать аудио. Попробуйте ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
         except Exception:
             await message.answer(
-                "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
+                "⚠️ Не удалось обработать аудио. Попробуйте ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
 
