@@ -1299,6 +1299,21 @@ async def finish_loading_message(wait_message: Message):
             pass
 
 
+async def send_image_with_hd_document(message: Message, image_bytes: bytes, filename: str, caption: str = "Готово"):
+    """Send image as normal chat preview + original file.
+
+    Telegram compresses images sent as photos. The first message keeps the
+    familiar bot UX; the second preserves the original PNG/JPEG quality for
+    download and posting elsewhere.
+    """
+    clean_caption = (caption or "Готово").strip() or "Готово"
+    preview_file = BufferedInputFile(image_bytes, filename=filename)
+    original_file = BufferedInputFile(image_bytes, filename=filename)
+
+    await message.answer_photo(photo=preview_file, caption=clean_caption[:900])
+    await message.answer_document(document=original_file, caption="HD-версия")
+
+
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
     try:
         await callback.message.edit_text(
@@ -2274,20 +2289,8 @@ async def photo_handler(message: Message):
                 except Exception:
                     pass
             filename = "edited_nano_banana.png" if selected_model == "nanobanana" else "edited_gpt_image.png"
-            photo = BufferedInputFile(edited_bytes, filename=filename)
-            hd_document = BufferedInputFile(edited_bytes, filename=filename)
-
-            await wait_message.delete()
-
-            await message.answer_photo(
-                photo=photo,
-                caption=(text_note[:900] if text_note else "Готово")
-            )
-
-            await message.answer_document(
-                document=hd_document,
-                caption="HD-версия"
-            )
+            await finish_loading_message(wait_message)
+            await send_image_with_hd_document(message, edited_bytes, filename, text_note if text_note else "Готово")
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image edited]")
             await increase_usage(message.from_user.id)
             await increase_image_usage(message.from_user.id)
@@ -2694,12 +2697,8 @@ async def chat_handler(message: Message):
                 except Exception:
                     pass
             filename = "nano_banana.png" if selected_model == "nanobanana" else "gpt_image.png"
-            photo = BufferedInputFile(image_bytes, filename=filename)
-            await wait_message.delete()
-            await message.answer_photo(
-                photo=photo,
-                caption=(text_note[:900] if text_note else "Готово"),
-            )
+            await finish_loading_message(wait_message)
+            await send_image_with_hd_document(message, image_bytes, filename, text_note if text_note else "Готово")
 
             await save_message(message.from_user.id, "assistant", f"[{selected_model} image generated]")
             await increase_usage(message.from_user.id)
