@@ -37,7 +37,7 @@ TARIFFS: dict[str, dict[str, Any]] = {
             "• работа с документами\n"
             "• голосовые ответы\n"
             "• разумное использование\n"
-            "• без тяжёлых reasoning-моделей"
+            "• без тяжёлых моделей глубокого анализа"
         ),
         "prices": {1: 600, 3: 1200, 6: 2000, 12: 3000},
         "rub_prices": {1: 850, 3: 1750, 6: 2850, 12: 4350},
@@ -103,8 +103,8 @@ HIDDEN_FAIR_USE = {
 }
 
 REFERRAL_REWARDS: dict[int, dict[str, Any]] = {
-    1: {"type": "vs_tokens", "amount": 20, "title": "+20 💰 VS токенов"},
-    3: {"type": "vs_tokens", "amount": 75, "title": "+75 💰 VS токенов"},
+    1: {"type": "vs_tokens", "amount": 20, "title": "+20 💵 VS токенов"},
+    3: {"type": "vs_tokens", "amount": 75, "title": "+75 💵 VS токенов"},
     10: {"type": "plan_days", "plan": "PLUS", "days": 7, "title": "+7 дней PLUS"},
     25: {"type": "plan_days", "plan": "PRO", "days": 7, "title": "+7 дней PRO"},
     100: {"type": "plan_days", "plan": "PRO", "days": 30, "title": "+30 дней PRO"},
@@ -169,7 +169,7 @@ def period_button_text(plan: str, months: int) -> str:
 
 def token_pack_button_text(amount: int) -> str:
     pack = VS_TOKEN_PACKS[amount]
-    return f"💰 {amount} VS токенов — ⭐ {pack['stars']} / {pack['rub']} ₽"
+    return f"💵 {amount} VS токенов — ⭐ {pack['stars']} / {pack['rub']} ₽"
 
 
 def referral_reward_title(milestone: int, reward_type: str | None = None, reward_value: str | None = None) -> str:
@@ -178,7 +178,7 @@ def referral_reward_title(milestone: int, reward_type: str | None = None, reward
         return reward["title"]
 
     if reward_type in {"vs_tokens", "tokens"} and reward_value:
-        return f"+{reward_value} 💰 VS токенов"
+        return f"+{reward_value} 💵 VS токенов"
 
     if reward_type == "requests" and reward_value:
         return f"+{reward_value} запросов"
@@ -193,7 +193,7 @@ def referral_reward_title(milestone: int, reward_type: str | None = None, reward
 def premium_text() -> str:
     return """💳 Купить подписку
 
-🟢 FREE
+❤️‍🔥 FREE
 • ChatGPT — GPT-5 mini
 • Gemini — 3.1 Flash
 • Claude — Sonnet 4.6
@@ -209,8 +209,8 @@ def premium_text() -> str:
 • работа с документами
 • голосовые ответы
 • разумное использование
-• без тяжёлых reasoning-моделей
-• +100 💰 VS токенов при покупке
+• без тяжёлых моделей глубокого анализа
+💵 +100 VS токенов при покупке
 
 💎 PRO / до 200 запросов в день
 • всё из PLUS
@@ -220,8 +220,9 @@ def premium_text() -> str:
 • файлы
 • приоритет
 • длинный контекст и кодинг
-• +300 💰 VS токенов при покупке
+💵 +100 VS токенов при покупке
 
-💰 VS токены покупаются отдельно и тратятся на изображения, редактирование фото, видео AI, voice, большие документы и premium generation.
+💵 VS токены покупаются отдельно и тратятся на изображения, редактирование фото, видео AI, голос, большие документы и премиум-генерацию.
 
-Важно: 💰 VS токены можно использовать только при активной подписке."""
+Важно: 💵 VS токены можно использовать только при активной подписке."""
+
