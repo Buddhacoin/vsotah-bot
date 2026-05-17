@@ -72,6 +72,15 @@ VS_TOKEN_PACKS: dict[int, dict[str, int]] = {
 
 # Internal default costs. They can be tuned later when exact providers are final.
 VS_TOKEN_COSTS: dict[str, int] = {
+    # Image generation/editing
+    "nanobanana_generate": 8,
+    "nanobanana_edit": 10,
+    "gptimage_generate": 10,
+    "gptimage_edit": 12,
+    "image_default": 10,
+    "image_edit_default": 12,
+
+    # Future image/video providers
     "flux_schnell_min": 1,
     "flux_schnell_max": 2,
     "flux_dev_min": 3,
@@ -82,9 +91,14 @@ VS_TOKEN_COSTS: dict[str, int] = {
     "midjourney_style_max": 15,
     "video_min": 20,
     "video_max": 100,
-    "image_default": 10,
-    "image_edit_default": 12,
-    "voice_default": 1,
+
+    # Voice. Voice is capped at 2 minutes in Telegram handler.
+    "voice_0_15_sec": 1,
+    "voice_16_60_sec": 2,
+    "voice_61_120_sec": 4,
+    "voice_default": 2,
+
+    # Heavy work
     "large_file_default": 3,
     "heavy_reasoning_default": 5,
 }
@@ -102,12 +116,32 @@ HIDDEN_FAIR_USE = {
     "max_prompt_chars_pro": 14000,
 }
 
+# Every invited friend gives +10 VS tokens immediately.
+# Milestones below are additional big bonuses.
+REFERRAL_FRIEND_BONUS_TOKENS = 10
+
 REFERRAL_REWARDS: dict[int, dict[str, Any]] = {
-    1: {"type": "vs_tokens", "amount": 20, "title": "+20 💵 VS токенов"},
-    3: {"type": "vs_tokens", "amount": 75, "title": "+75 💵 VS токенов"},
-    10: {"type": "plan_days", "plan": "PLUS", "days": 7, "title": "+7 дней PLUS"},
-    25: {"type": "plan_days", "plan": "PRO", "days": 7, "title": "+7 дней PRO"},
-    100: {"type": "plan_days", "plan": "PRO", "days": 30, "title": "+30 дней PRO"},
+    100: {
+        "type": "combo",
+        "tokens": 1200,
+        "plan": "PLUS",
+        "days": 10,
+        "title": "+1200 VS токенов и +10 дней PLUS",
+    },
+    500: {
+        "type": "combo",
+        "tokens": 7000,
+        "plan": "PLUS",
+        "days": 30,
+        "title": "+7000 VS токенов и +30 дней PLUS",
+    },
+    1000: {
+        "type": "combo",
+        "tokens": 16000,
+        "plan": "PRO",
+        "days": 30,
+        "title": "+16000 VS токенов и +30 дней PRO",
+    },
 }
 
 PLAN_LEVELS = {
@@ -172,13 +206,43 @@ def token_pack_button_text(amount: int) -> str:
     return f"💵 {amount} VS токенов — ⭐ {pack['stars']} / {pack['rub']} ₽"
 
 
+def image_token_cost(model: str, is_edit: bool = False) -> int:
+    model = (model or "").lower()
+    if model == "nanobanana":
+        return VS_TOKEN_COSTS["nanobanana_edit" if is_edit else "nanobanana_generate"]
+    if model == "gptimage":
+        return VS_TOKEN_COSTS["gptimage_edit" if is_edit else "gptimage_generate"]
+    return VS_TOKEN_COSTS["image_edit_default" if is_edit else "image_default"]
+
+
+def image_cost_text(model: str, is_edit: bool = False) -> str:
+    return f"Стоимость: {image_token_cost(model, is_edit)} VS токенов"
+
+
+def voice_token_cost(duration_seconds: int | None) -> int:
+    duration = int(duration_seconds or 0)
+    if duration <= 15:
+        return VS_TOKEN_COSTS["voice_0_15_sec"]
+    if duration <= 60:
+        return VS_TOKEN_COSTS["voice_16_60_sec"]
+    return VS_TOKEN_COSTS["voice_61_120_sec"]
+
+
+def voice_cost_text(duration_seconds: int | None) -> str:
+    duration = int(duration_seconds or 0)
+    return f"Стоимость голосового: {voice_token_cost(duration)} VS токенов"
+
+
 def referral_reward_title(milestone: int, reward_type: str | None = None, reward_value: str | None = None) -> str:
     reward = REFERRAL_REWARDS.get(int(milestone))
     if reward:
         return reward["title"]
 
     if reward_type in {"vs_tokens", "tokens"} and reward_value:
-        return f"+{reward_value} 💵 VS токенов"
+        return f"+{reward_value} VS токенов"
+
+    if reward_type == "combo":
+        return "бонус за партнёрский порог"
 
     if reward_type == "requests" and reward_value:
         return f"+{reward_value} запросов"
@@ -220,7 +284,7 @@ def premium_text() -> str:
 • файлы
 • приоритет
 • длинный контекст и кодинг
-💵 +100 VS токенов при покупке
+💵 +300 VS токенов при покупке
 
 💵 VS токены покупаются отдельно и тратятся на изображения, редактирование фото, видео AI, голос, большие документы и премиум-генерацию.
 
