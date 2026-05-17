@@ -62,11 +62,16 @@ from app.economy import (
     TARIFFS,
     VS_TOKEN_PACKS,
     REFERRAL_REWARDS,
+    REFERRAL_FRIEND_BONUS_TOKENS,
     referral_reward_title,
     premium_text,
     tariff_button_text,
     period_button_text,
     token_pack_button_text,
+    image_token_cost,
+    image_cost_text,
+    voice_token_cost,
+    voice_cost_text,
     subscription_bonus_tokens,
     plan_level,
     model_required_plan,
@@ -110,6 +115,7 @@ VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "900"))
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "75"))
 MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
 MAX_VOICE_SIZE = int(os.getenv("MAX_VOICE_SIZE", str(20 * 1024 * 1024)))
+MAX_VOICE_DURATION_SECONDS = int(os.getenv("MAX_VOICE_DURATION_SECONDS", "120"))
 FILE_TEXT_LIMIT = int(os.getenv("FILE_TEXT_LIMIT", "18000"))
 VOICE_REPLY_ENABLED = os.getenv("VOICE_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_ERROR_NOTIFICATIONS = os.getenv("ADMIN_ERROR_NOTIFICATIONS", "false").lower() in {"1", "true", "yes", "on"}
@@ -479,6 +485,30 @@ async def init_db():
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_referral_abuse_referrer_id ON referral_abuse_events(referrer_id);")
 
+        # Keep admin diagnostics clean and prevent the events table from growing forever.
+        await cleanup_old_events(conn)
+
+
+async def cleanup_old_events(conn):
+    """Delete short-lived technical events. Payments/referrals/token history stay forever."""
+    await conn.execute("""
+        DELETE FROM events
+        WHERE created_at < NOW() - INTERVAL '5 days'
+          AND (
+              event_type ILIKE '%error%'
+              OR event_type IN (
+                  'ai_provider_error', 'file_error', 'vision_error', 'image_error', 'voice_error',
+                  'voice_tts_error', 'photo_download_error', 'limit_reached', 'spam_block'
+              )
+          )
+    """)
+
+    await conn.execute("""
+        DELETE FROM events
+        WHERE created_at < NOW() - INTERVAL '14 days'
+          AND event_type NOT IN ('activate_plan', 'admin_set_plan', 'payment', 'referral_reward', 'referral_joined', 'referral_paid')
+    """)
+
 
 async def log_event(telegram_id: int | None, event_type: str, details: str = ""):
     """Fast event logging.
@@ -553,6 +583,7 @@ async def track_referral_start(referred_id: int, referrer_id: int | None):
                 return False
 
         await log_event(referred_id, "referral_joined", str(referrer_id))
+        await add_vs_tokens(referrer_id, REFERRAL_FRIEND_BONUS_TOKENS, "referral_friend_bonus", f"referred:{referred_id}")
         await process_referral_rewards(referrer_id)
         return True
     except Exception as e:
@@ -591,6 +622,8 @@ async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict, 
     reward_type = reward["type"]
     if reward_type in {"requests", "vs_tokens"}:
         reward_value = str(reward["amount"])
+    elif reward_type == "combo":
+        reward_value = f"tokens:{reward.get('tokens', 0)};plan:{reward['plan']}:{reward['days']}"
     else:
         reward_value = f"{reward['plan']}:{reward['days']}"
 
@@ -626,6 +659,19 @@ async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict, 
                 VALUES ($1, $2, 'referral_reward', $3)
             """, referrer_id, amount, f"milestone:{milestone}")
 
+        if reward_type == "combo":
+            amount = int(reward.get("tokens") or 0)
+            if amount > 0:
+                await conn.execute("""
+                    UPDATE users
+                    SET vs_tokens = COALESCE(vs_tokens, 0) + $2
+                    WHERE telegram_id=$1
+                """, referrer_id, amount)
+                await conn.execute("""
+                    INSERT INTO token_transactions (telegram_id, amount, reason, meta)
+                    VALUES ($1, $2, 'referral_milestone', $3)
+                """, referrer_id, amount, f"milestone:{milestone}")
+
         await conn.execute("""
             UPDATE referrals
             SET reward_status='rewarded'
@@ -639,6 +685,8 @@ async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict, 
         """, referrer_id, milestone)
 
     if reward_type == "plan_days":
+        await apply_plan_days_bonus(referrer_id, reward["plan"], int(reward["days"]))
+    elif reward_type == "combo":
         await apply_plan_days_bonus(referrer_id, reward["plan"], int(reward["days"]))
 
     await log_event(referrer_id, "referral_reward", f"{milestone}: {reward_title}")
@@ -730,7 +778,7 @@ def build_reward_history_lines(rewards) -> str:
         title = row["reward_title"] or referral_reward_title(milestone, row["reward_type"], row["reward_value"])
         created_at = row["created_at"].strftime("%d.%m.%Y") if row["created_at"] else ""
         suffix = f" — {created_at}" if created_at else ""
-        lines.append(f"• {milestone} друг → {title}{suffix}")
+        lines.append(f"• {milestone} друзей → {title}{suffix}")
     return "\n".join(lines)
 
 
@@ -749,11 +797,10 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         f"• 💵 VS токенов: {stats['vs_tokens']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Бонусы за приглашения:\n"
-        "• 1 друг → 💵 +20 VS токенов\n"
-        "• 3 друга → 💵 +75 VS токенов\n"
-        "• 10 друзей → +7 дней PLUS\n"
-        "• 25 друзей → +7 дней PRO\n"
-        "• 100 друзей → +30 дней PRO\n\n"
+        "• Каждый друг → +10 VS токенов\n"
+        "• 100 друзей → +1200 VS токенов и +10 дней PLUS\n"
+        "• 500 друзей → +7000 VS токенов и +30 дней PLUS\n"
+        "• 1000 друзей → +16000 VS токенов и +30 дней PRO\n\n"
         "Бонусы выдаются автоматически внутри бота."
     )
 
@@ -787,9 +834,14 @@ async def build_referral_stats_text(user_id: int) -> str:
 async def build_referral_bonuses_text(user_id: int) -> str:
     stats = await get_referral_stats(user_id)
     return (
-        "🎁 Бонусы\n\n"
+        "🎁 Бонусы партнёрки\n\n"
         f"Сейчас приглашено: {stats['invited']}\n"
-        f"Бонусов получено: {stats['rewards_count']}"
+        f"Бонусов получено: {stats['rewards_count']}\n\n"
+        "• Каждый друг → +10 VS токенов\n"
+        "• 100 друзей → +1200 VS токенов и +10 дней PLUS\n"
+        "• 500 друзей → +7000 VS токенов и +30 дней PLUS\n"
+        "• 1000 друзей → +16000 VS токенов и +30 дней PRO\n\n"
+        "Подписки за токены не выдаются."
     )
 
 
@@ -1130,7 +1182,38 @@ async def add_vs_tokens(telegram_id: int, amount: int, reason: str, meta: str = 
 
 async def can_use_vs_tokens(user) -> tuple[bool, str | None]:
     if not has_active_paid_subscription(user):
-        return False, "Для использования 💵 VS токенов нужна активная подписка PLUS или PRO."
+        return False, "Для использования VS токенов нужна активная подписка PLUS или PRO."
+    return True, None
+
+
+async def spend_vs_tokens(user, amount: int, reason: str, meta: str = "") -> tuple[bool, str | None]:
+    amount = int(amount or 0)
+    if amount <= 0:
+        return True, None
+
+    can_use, error_text = await can_use_vs_tokens(user)
+    if not can_use:
+        return False, error_text
+
+    telegram_id = user["telegram_id"]
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE users
+            SET vs_tokens = COALESCE(vs_tokens, 0) - $2
+            WHERE telegram_id=$1 AND COALESCE(vs_tokens, 0) >= $2
+            RETURNING vs_tokens
+        """, telegram_id, amount)
+
+        if not row:
+            balance = await conn.fetchval("SELECT COALESCE(vs_tokens, 0) FROM users WHERE telegram_id=$1", telegram_id)
+            return False, f"Недостаточно VS токенов. Нужно: {amount}, на балансе: {balance or 0}."
+
+        await conn.execute("""
+            INSERT INTO token_transactions (telegram_id, amount, reason, meta)
+            VALUES ($1, $2, $3, $4)
+        """, telegram_id, -amount, reason, meta[:500])
+
+    await log_event(telegram_id, "vs_tokens_spend", f"-{amount} {reason} {meta}"[:900])
     return True, None
 
 
@@ -1215,6 +1298,8 @@ async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
         raise ValueError("VOICE_NOT_FOUND")
     if voice.file_size and voice.file_size > MAX_VOICE_SIZE:
         raise ValueError("VOICE_TOO_LARGE")
+    if voice.duration and voice.duration > MAX_VOICE_DURATION_SECONDS:
+        raise ValueError("VOICE_TOO_LONG")
 
     file = await bot.get_file(voice.file_id)
     buffer = BytesIO()
@@ -1658,7 +1743,7 @@ async def tokenpack_callback(callback: CallbackQuery):
     await log_event(callback.from_user.id, "tokenpack_select", str(amount))
     await safe_edit_or_send(
         callback,
-        f"💰 Пакет VS токенов\n\nКоличество: {amount}\nЦена: ⭐ {pack['stars']} / {pack['rub']} ₽\n\nТокены сохраняются на балансе, но тратить их можно только при активной подписке.",
+        f"💵 Пакет VS токенов\n\nКоличество: {amount}\nЦена: ⭐ {pack['stars']} / {pack['rub']} ₽\n\nТокены сохраняются на балансе, но тратить их можно только при активной подписке.",
         reply_markup=token_payment_menu(amount),
     )
 
@@ -1831,12 +1916,16 @@ async def set_model_callback(callback: CallbackQuery):
         pass
 
     if model in {"nanobanana", "gptimage"}:
+        generate_cost = image_token_cost(model, is_edit=False)
+        edit_cost = image_token_cost(model, is_edit=True)
         model_text = (
             f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\n"
+            f"Генерация изображения: {generate_cost} VS токенов.\n"
+            f"Редактирование фото: {edit_cost} VS токенов.\n\n"
             "Для редактирования фото:\n"
             "1. Сначала отправьте фото без подписи.\n"
             "2. Затем отдельным сообщением отправьте описание изменений.\n\n"
-            "Так можно писать длинные промпты без ограничений Telegram."
+            "VS токены можно использовать только при активной подписке."
         )
     else:
         model_text = f"✅ Нейросеть выбрана:\n\n{model_display_name(model)}\n\nНапишите запрос, отправьте фото или выберите действие ниже."
@@ -2803,14 +2892,41 @@ async def voice_handler(message: Message):
     wait_message = await message.answer("🎙 Слушаю голосовое...")
 
     try:
+        duration = int(message.voice.duration or 0) if message.voice else 0
+        if duration > MAX_VOICE_DURATION_SECONDS:
+            await wait_message.edit_text(
+                "⚠️ Голосовое слишком длинное. Сейчас лимит — до 2 минут.",
+                reply_markup=main_menu(),
+            )
+            return
+
+        cost = voice_token_cost(duration)
+        ok, token_error = await spend_vs_tokens(user, cost, "voice_request", f"duration:{duration}")
+        if not ok:
+            await wait_message.edit_text(
+                f"⚠️ {token_error}\n\n{voice_cost_text(duration)}.\nЛимит голосового — до 2 минут.",
+                reply_markup=tariffs_menu(),
+            )
+            return
+
         filename, audio_bytes = await download_telegram_voice(message)
 
-        await wait_message.edit_text("🎧 Распознаю речь...")
+        await wait_message.edit_text(f"🎧 Распознаю речь...\n{voice_cost_text(duration)}")
+        loading_task = asyncio.create_task(animate_thinking(wait_message, "🎧 Распознаю речь"))
         transcript = await transcribe_voice(audio_bytes, filename)
+        if loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         if not transcript:
+            await add_vs_tokens(message.from_user.id, cost, "voice_refund", "empty_transcript")
             await wait_message.edit_text(
-                "⚠️ Не удалось распознать голосовое. Попробуйте записать ещё раз или отправьте текстом.",
+                "⚠️ Не удалось распознать голосовое. VS токены возвращены на баланс. Попробуйте записать ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
             return
@@ -2854,8 +2970,23 @@ async def voice_handler(message: Message):
 
     except ValueError as e:
         error_code = str(e)
+        if 'loading_task' in locals() and loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        if 'cost' in locals():
+            try:
+                await add_vs_tokens(message.from_user.id, cost, "voice_refund", error_code)
+            except Exception:
+                pass
         if error_code == "VOICE_TOO_LARGE":
             await wait_message.edit_text("⚠️ Голосовое слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
+        elif error_code == "VOICE_TOO_LONG":
+            await wait_message.edit_text("⚠️ Голосовое слишком длинное. Сейчас лимит — до 2 минут.", reply_markup=main_menu())
         else:
             await wait_message.edit_text("⚠️ Не удалось скачать голосовое. Попробуйте ещё раз.", reply_markup=main_menu())
 
@@ -2865,6 +2996,19 @@ async def voice_handler(message: Message):
         print(f"VOICE ERROR TRACE:\n{traceback.format_exc()}")
         await log_event(message.from_user.id, "voice_error", admin_error)
         await send_ai_error_to_admin(f"⚠️ VOICE AI ERROR | {selected_model} | {admin_error}")
+        if 'loading_task' in locals() and loading_task:
+            loading_task.cancel()
+            try:
+                await loading_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        if 'cost' in locals():
+            try:
+                await add_vs_tokens(message.from_user.id, cost, "voice_refund_error", selected_model)
+            except Exception:
+                pass
 
         try:
             await wait_message.edit_text(
@@ -2919,8 +3063,23 @@ async def chat_handler(message: Message):
         if pending_edit and (time.time() - float(pending_edit.get("created_at") or 0) > PENDING_IMAGE_EDIT_TTL_SECONDS):
             pending_edit = None
 
+        is_edit_request = bool(pending_edit)
+        cost = image_token_cost(selected_model, is_edit=is_edit_request)
+        ok, token_error = await spend_vs_tokens(
+            user,
+            cost,
+            "image_edit" if is_edit_request else "image_generate",
+            selected_model,
+        )
+        if not ok:
+            await message.answer(
+                f"⚠️ {token_error}\n\nСтоимость этой генерации: {cost} VS токенов.",
+                reply_markup=tariffs_menu(),
+            )
+            return
+
         wait_text = "Редактирую изображение" if pending_edit else "Генерирую изображение"
-        wait_message = await message.answer(f"{wait_text}...")
+        wait_message = await message.answer(f"{wait_text}...\nСтоимость: {cost} VS токенов")
         loading_task = asyncio.create_task(animate_thinking(wait_message, wait_text))
         try:
             await save_message(message.from_user.id, "user", message.text)
@@ -2946,8 +3105,9 @@ async def chat_handler(message: Message):
                         pass
                     except Exception:
                         pass
+                await add_vs_tokens(message.from_user.id, cost, "image_refund", selected_model)
                 await wait_message.edit_text(
-                    "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
+                    "⚠️ Генерация временно недоступна. VS токены возвращены на баланс. Попробуйте ещё раз чуть позже.",
                     reply_markup=main_menu(),
                 )
                 return
@@ -2999,6 +3159,11 @@ async def chat_handler(message: Message):
             print(f"IMAGE ERROR SHORT:\n{admin_error}")
             print(f"IMAGE ERROR TRACE:\n{traceback.format_exc()}")
             await log_event(message.from_user.id, "image_error", admin_error)
+            if 'cost' in locals():
+                try:
+                    await add_vs_tokens(message.from_user.id, cost, "image_refund_error", selected_model)
+                except Exception:
+                    pass
             try:
                 await wait_message.edit_text(
                     "⚠️ Генерация временно недоступна. Попробуйте ещё раз чуть позже.",
