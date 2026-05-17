@@ -200,7 +200,7 @@ def tariffs_menu():
         [InlineKeyboardButton(text=tariff_button_text(plan), callback_data=f"tariff_{plan}")]
         for plan in TARIFFS
     ]
-    rows.append([InlineKeyboardButton(text="💰 Купить VS токены", callback_data="tokens_shop")])
+    rows.append([InlineKeyboardButton(text="💵 Купить VS токены", callback_data="tokens_shop")])
     rows.append([InlineKeyboardButton(text="← Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -746,11 +746,11 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         "📊 Твоя статистика:\n"
         f"• Приглашено: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• 💰 VS токенов: {stats['vs_tokens']}\n"
+        f"• 💵 VS токенов: {stats['vs_tokens']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Бонусы за приглашения:\n"
-        "• 1 друг → +20 💰 VS токенов\n"
-        "• 3 друга → +75 💰 VS токенов\n"
+        "• 1 друг → +20 💵 VS токенов\n"
+        "• 3 друга → +75 💵 VS токенов\n"
         "• 10 друзей → +7 дней PLUS\n"
         "• 25 друзей → +7 дней PRO\n"
         "• 100 друзей → +30 дней PRO\n\n"
@@ -776,7 +776,7 @@ async def build_referral_stats_text(user_id: int) -> str:
         "📊 Моя статистика партнёрки\n\n"
         f"• Приглашено всего: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
-        f"• 💰 VS токенов сейчас: {stats['vs_tokens']}\n"
+        f"• 💵 VS токенов сейчас: {stats['vs_tokens']}\n"
         f"• Бонусных запросов сейчас: {stats['bonus_requests']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Уже получено:\n"
@@ -1130,7 +1130,7 @@ async def add_vs_tokens(telegram_id: int, amount: int, reason: str, meta: str = 
 
 async def can_use_vs_tokens(user) -> tuple[bool, str | None]:
     if not has_active_paid_subscription(user):
-        return False, "Для использования 💰 VS токенов нужна активная подписка PLUS или PRO."
+        return False, "Для использования 💵 VS токенов нужна активная подписка PLUS или PRO."
     return True, None
 
 
@@ -1159,14 +1159,14 @@ async def user_profile_text(user):
         f"📊 Статистика использования\n\n"
         f"{usage_block}\n\n"
         f"Подписка: {plan}\n"
-        f"💰 VS токены: {vs_tokens}\n"
+        f"💵 VS токены: {vs_tokens}\n"
         f"Выбрана модель: {current_model}\n\n"
     )
 
     if plan != "FREE" and user["plan_until"]:
         text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
     elif vs_tokens > 0:
-        text += "💰 VS токены сохраняются, но использовать их можно только при активной подписке.\n\n"
+        text += "💵 VS токены сохраняются, но использовать их можно только при активной подписке.\n\n"
 
     referral_stats = await get_referral_stats(user["telegram_id"])
     text += (
@@ -1177,10 +1177,10 @@ async def user_profile_text(user):
     )
 
     text += (
-        "Нужно больше? 🚀 Выберите тариф или купите 💰 VS токены:\n\n"
-        "⭐ PLUS — до 100 запросов в день +100 💰 VS токенов\n"
-        "💎 PRO — до 200 запросов в день +300 💰 VS токенов\n"
-        "💰 VS токены — для изображений, видео, voice и premium generation"
+        "Нужно больше? 🚀 Выберите тариф или купите 💵 VS токены:\n\n"
+        "⭐ PLUS — до 100 запросов в день +100 💵 VS токенов\n"
+        "💎 PRO — до 200 запросов в день +300 💵 VS токенов\n"
+        "💵 VS токены — для изображений, видео, голос и премиум-генерацию"
     )
     return text
 
@@ -1222,8 +1222,53 @@ async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
 
 # File extraction lives in app/ai/file_router.py.
 
-def short_error_text(error: Exception) -> str:
-    return str(error).replace("\n", " ")[:1200]
+def short_error_text(error: Exception | str) -> str:
+    raw = str(error).replace("\n", " ").strip()
+    return raw[:1200]
+
+
+def human_error_text(error: Exception | str) -> str:
+    """Readable Russian version for admin screens."""
+    raw = short_error_text(error)
+    lower = raw.lower()
+
+    if "insufficient_quota" in lower or "exceeded your current quota" in lower:
+        return "Закончился баланс или лимит OpenAI API. Пополните баланс в OpenAI Billing."
+    if "rate limit" in lower or "ratelimit" in lower or "429" in lower:
+        return "Лимит запросов API. Нужно подождать или проверить лимиты/баланс провайдера."
+    if "request timeout" in lower or "timed out" in lower or "timeout" in lower:
+        return "Таймаут: провайдер слишком долго отвечал. Обычно помогает повторить запрос."
+    if "loading_task" in lower and "not defined" in lower:
+        return "Внутренняя ошибка обработки файла: loading_task не был создан."
+    if "telegramconflicterror" in lower or "getupdates" in lower:
+        return "Запущены два polling-экземпляра бота одновременно."
+    if "api key" in lower or "unauthorized" in lower or "401" in lower:
+        return "Проблема с API-ключом: ключ отсутствует, неверный или отключён."
+    if "connection" in lower or "network" in lower:
+        return "Сетевая ошибка соединения с внешним сервисом."
+
+    return raw[:260]
+
+
+def human_event_type(event_type: str | None) -> str:
+    mapping = {
+        "voice_error": "ошибка голосового",
+        "file_error": "ошибка файла",
+        "image_error": "ошибка изображения",
+        "vision_error": "ошибка анализа фото",
+        "ai_provider_error": "ошибка AI-провайдера",
+        "photo_download_error": "ошибка загрузки фото",
+        "voice_tts_error": "ошибка голосового ответа",
+        "limit_reached": "упёрся в лимит",
+        "FREE_IMAGE_DAY_LIMIT": "дневной лимит Image во FREE",
+        "FREE_DAY_LIMIT": "дневной лимит FREE",
+        "FREE_WEEK_LIMIT": "недельный лимит FREE",
+    }
+    return mapping.get(event_type or "", event_type or "—")
+
+
+def human_status_on_off(value: bool) -> str:
+    return "✅ включено" if value else "❌ выключено"
 
 
 _BOT_ME_CACHE = {"value": None, "expires_at": 0.0}
@@ -1565,7 +1610,7 @@ async def tariff_callback(callback: CallbackQuery):
     tariff = TARIFFS[plan]
     await safe_edit_or_send(
         callback,
-        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nБонус: +{tariff['bonus_tokens']} 💰 VS токенов\n\nВыберите период подписки:",
+        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nБонус: +{tariff['bonus_tokens']} 💵 VS токенов\n\nВыберите период подписки:",
         reply_markup=period_menu(plan),
     )
 
@@ -1582,7 +1627,7 @@ async def period_callback(callback: CallbackQuery):
     await log_event(callback.from_user.id, "period_select", f"{plan} {months}")
     await safe_edit_or_send(
         callback,
-        f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена: ⭐ {price} / {rub_price} ₽\nБонус: +{TARIFFS[plan]['bonus_tokens']} 💰 VS токенов",
+        f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена: ⭐ {price} / {rub_price} ₽\nБонус: +{TARIFFS[plan]['bonus_tokens']} 💵 VS токенов",
         reply_markup=payment_method_menu(plan, months),
     )
 
@@ -1593,9 +1638,9 @@ async def tokens_shop_callback(callback: CallbackQuery):
     await log_event(callback.from_user.id, "tokens_shop_open")
     await safe_edit_or_send(
         callback,
-        "💰 Купить VS токены\n\n"
-        "VS токены тратятся на изображения, редактирование фото, видео AI, voice, большие документы и premium generation.\n\n"
-        "Важно: использовать 💰 VS токены можно только при активной подписке PLUS или PRO.\n\n"
+        "💵 Купить VS токены\n\n"
+        "VS токены тратятся на изображения, редактирование фото, видео AI, голос, большие документы и премиум-генерацию.\n\n"
+        "Важно: использовать 💵 VS токены можно только при активной подписке PLUS или PRO.\n\n"
         "Выберите пакет:",
         reply_markup=tokens_shop_menu(),
     )
@@ -1654,7 +1699,7 @@ async def pay_tokens_callback(callback: CallbackQuery):
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
         title=f"{amount} VS токенов",
-        description="💰 VS токены для изображений, видео AI, voice и premium generation.",
+        description="💵 VS токены для изображений, видео AI, голос и премиум-генерацию.",
         payload=payload,
         provider_token="",
         currency="XTR",
@@ -1705,7 +1750,7 @@ async def successful_payment_handler(message: Message):
             )
 
         await add_vs_tokens(message.from_user.id, amount_tokens, "token_purchase", payload)
-        await message.answer(f"✅ Оплата прошла успешно!\n\nНа баланс начислено: +{amount_tokens} 💰 VS токенов", reply_markup=main_menu())
+        await message.answer(f"✅ Оплата прошла успешно!\n\nНа баланс начислено: +{amount_tokens} 💵 VS токенов", reply_markup=main_menu())
         return
 
     plan = None
@@ -1753,7 +1798,7 @@ async def successful_payment_handler(message: Message):
 
     bonus_tokens = subscription_bonus_tokens(plan, months)
     await message.answer(
-        f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.\nНачислено: +{bonus_tokens} 💰 VS токенов",
+        f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.\nНачислено: +{bonus_tokens} 💵 VS токенов",
         reply_markup=main_menu(),
     )
 
@@ -1816,7 +1861,7 @@ async def admin_handler(message: Message):
         "/setplus telegram_id — выдать PLUS на 1 месяц\n"
         "/setpro telegram_id — выдать PRO на 1 месяц\n"
         "/setfree telegram_id — снять подписку\n"
-        "/addtokens telegram_id amount — выдать 💰 VS токены"
+        "/addtokens telegram_id amount — выдать 💵 VS токены"
     )
 
 
@@ -1918,7 +1963,7 @@ async def stats_handler(message: Message):
         f"🎙 Voice-запросов всего: {voice_requests}\n\n"
         f"⭐ PLUS: {plus_users}\n"
         f"💎 PRO: {pro_users}\n"
-        f"💰 Новая экономика: PLUS / PRO + VS токены\n\n"
+        f"💵 Новая экономика: PLUS / PRO + VS токены\n\n"
         f"💳 Открытий премиума: {premium_clicks}\n"
         f"⭐ Открытий оплаты Stars: {invoices}\n"
         f"✅ Платежей: {payments_count}\n"
@@ -1983,7 +2028,7 @@ async def refstats_handler(message: Message):
         )
 
     await message.answer(
-        "💰 Referral stats\n\n"
+        "💵 Статистика партнёрки\n\n"
         f"Всего приглашений: {total_referrals}\n"
         f"Оплат от приглашённых: {paid_referrals}\n"
         f"Конверсия в оплату: {percent(paid_referrals, total_referrals)}\n"
@@ -2043,11 +2088,11 @@ async def admin_health_command(message: Message):
         db_status = "✅ OK"
         if latest_error_rows:
             latest_errors_text = "\n".join(
-                f"• {fmt_dt(row['created_at'])} — {row['event_type']}: {short_error_text(row['details'])[:120]}"
+                f"• {fmt_dt(row['created_at'])} — {human_event_type(row['event_type'])}: {human_error_text(row['details'])}"
                 for row in latest_error_rows
             )
     except Exception as e:
-        db_status = f"❌ {short_error_text(e)[:120]}"
+        db_status = f"❌ {human_error_text(e)[:120]}"
 
     bot_status = "❌ ERROR"
     bot_username_text = "—"
@@ -2056,48 +2101,48 @@ async def admin_health_command(message: Message):
         bot_username_text = f"@{me.username}" if me and me.username else "—"
         bot_status = "✅ OK"
     except Exception as e:
-        bot_status = f"❌ {short_error_text(e)[:120]}"
+        bot_status = f"❌ {human_error_text(e)[:120]}"
 
-    tavily_status = "❌ OFF"
+    tavily_status = "❌ выключен"
     if TAVILY_API_KEY:
         try:
             test_results = await search_web("latest technology news")
-            tavily_status = "✅ ON / search OK" if test_results else "⚠️ KEY SET / no results"
+            tavily_status = "✅ включён, поиск работает" if test_results else "⚠️ ключ есть, но результатов нет"
         except Exception as e:
-            tavily_status = f"❌ ERROR: {short_error_text(e)[:90]}"
+            tavily_status = f"❌ ошибка: {human_error_text(e)[:90]}"
 
     redis_ok, redis_latency_ms, redis_details = await redis_health()
     queue_size = await event_queue_size()
-    redis_status = "✅ OK" if redis_ok else f"⚠️ {redis_details}"
+    redis_status = "✅ работает" if redis_ok else f"⚠️ не настроен / {redis_details}"
 
     await message.answer(
-        "🩺 VSotahBot Health 3.0\n\n"
-        f"Mode: {runtime_mode}\n"
-        f"Bot API: {bot_status}\n"
-        f"Bot: {bot_username_text}\n"
-        f"PostgreSQL: {db_status}\n"
-        f"DB latency: {db_latency_ms} ms\n"
-        f"Uptime: {uptime_text}\n\n"
-        "🔌 Providers:\n"
-        f"• OpenAI key: {'✅' if OPENAI_API_KEY else '❌'}\n"
-        f"• Claude key: {'✅' if ANTHROPIC_API_KEY else '❌'}\n"
-        f"• Gemini key: {'✅' if GOOGLE_API_KEY else '❌'}\n"
-        f"• DeepSeek key: {'✅' if DEEPSEEK_API_KEY else '❌'}\n"
-        f"• Live Web / Tavily: {tavily_status}\n\n"
-        "⚙️ Infrastructure:\n"
-        f"• Redis cache: {redis_status}\n"
-        f"• Redis latency: {redis_latency_ms if redis_latency_ms is not None else '—'} ms\n"
-        f"• Event queue: {queue_size}\n"
-        f"• Voice replies: {'✅ ON' if VOICE_REPLY_ENABLED else '❌ OFF'}\n"
-        f"• Admin error notifications: {'ON' if ADMIN_ERROR_NOTIFICATIONS else 'OFF'}\n\n"
-        "📊 Last 24h:\n"
-        f"• Users total: {users_total}\n"
-        f"• New users: {users_24h}\n"
-        f"• Events: {events_24h}\n"
-        f"• AI events: {ai_events_24h}\n"
-        f"• Payments: {payments_24h}\n"
-        f"• Errors: {error_events_24h}\n\n"
-        f"🧯 Latest errors:\n{latest_errors_text}"
+        "🩺 Здоровье VSotahBot 3.0\n\n"
+        f"Режим работы: {runtime_mode}\n"
+        f"Связь с Telegram: {bot_status}\n"
+        f"Бот: {bot_username_text}\n"
+        f"База данных PostgreSQL: {db_status}\n"
+        f"Скорость БД: {db_latency_ms} мс\n"
+        f"Работает без перезапуска: {uptime_text}\n\n"
+        "🔌 AI-провайдеры:\n"
+        f"• OpenAI: {'✅ ключ есть' if OPENAI_API_KEY else '❌ ключа нет'}\n"
+        f"• Claude: {'✅ ключ есть' if ANTHROPIC_API_KEY else '❌ ключа нет'}\n"
+        f"• Gemini: {'✅ ключ есть' if GOOGLE_API_KEY else '❌ ключа нет'}\n"
+        f"• DeepSeek: {'✅ ключ есть' if DEEPSEEK_API_KEY else '❌ ключа нет'}\n"
+        f"• Поиск в интернете: {tavily_status}\n\n"
+        "⚙️ Инфраструктура:\n"
+        f"• Redis-кэш: {redis_status}\n"
+        f"• Скорость Redis: {redis_latency_ms if redis_latency_ms is not None else '—'} мс\n"
+        f"• Очередь событий: {queue_size}\n"
+        f"• Голосовые ответы: {human_status_on_off(VOICE_REPLY_ENABLED)}\n"
+        f"• Уведомления админу об ошибках: {human_status_on_off(ADMIN_ERROR_NOTIFICATIONS)}\n\n"
+        "📊 За последние 24 часа:\n"
+        f"• Всего пользователей: {users_total}\n"
+        f"• Новых пользователей: {users_24h}\n"
+        f"• Всего событий: {events_24h}\n"
+        f"• AI-запросов: {ai_events_24h}\n"
+        f"• Платежей: {payments_24h}\n"
+        f"• Ошибок: {error_events_24h}\n\n"
+        f"🧯 Последние ошибки:\n{latest_errors_text}"
     )
 
 
@@ -2127,19 +2172,19 @@ async def admin_errors_command(message: Message):
     errors_text = "Ошибок пока нет."
     if error_rows:
         errors_text = "\n".join(
-            f"• {fmt_dt(row['created_at'])} | {row['event_type']} | ID {row['telegram_id'] or '—'} | {(row['details'] or '')[:140]}"
+            f"• {fmt_dt(row['created_at'])} | {human_event_type(row['event_type'])} | пользователь {row['telegram_id'] or '—'} | {human_error_text(row['details'])}"
             for row in error_rows
         )
 
     limits_text = "Лимиты за 24 часа не упирались."
     if limit_rows:
         limits_text = "\n".join(
-            f"• {row['details'] or 'unknown'}: {row['count']}"
+            f"• {human_event_type(row['details'])}: {row['count']}"
             for row in limit_rows
         )
 
     await message.answer(
-        "⚠️ VSotah Errors / Limits\n\n"
+        "⚠️ Ошибки и лимиты VSotah\n\n"
         f"Последние ошибки:\n{errors_text}\n\n"
         f"Лимиты за 24 часа:\n{limits_text}"
     )
@@ -2164,7 +2209,7 @@ async def users_handler(message: Message):
             f"Имя: {name}\n"
             f"Тариф: {row['plan']}\n"
             f"Запросов за неделю: {row['weekly_used']}\n"
-            f"💰 VS токены: {row['vs_tokens']}\n"
+            f"💵 VS токены: {row['vs_tokens']}\n"
             f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
     await message.answer(text[:3900])
@@ -2223,7 +2268,7 @@ async def admin_set_plan(message: Message, plan: str):
             """, telegram_id, bonus_tokens, plan)
 
     await log_event(telegram_id, "admin_set_plan", f"{plan} +{bonus_tokens} tokens")
-    suffix = f" и начислено +{bonus_tokens} 💰 VS токенов" if bonus_tokens else ""
+    suffix = f" и начислено +{bonus_tokens} 💵 VS токенов" if bonus_tokens else ""
     await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}{suffix}.")
 
 
@@ -2240,7 +2285,7 @@ async def addtokens_handler(message: Message):
     telegram_id = int(parts[1])
     amount = int(parts[2])
     await add_vs_tokens(telegram_id, amount, "admin_addtokens", f"by:{message.from_user.id}")
-    await message.answer(f"✅ Пользователю {telegram_id} начислено {amount} 💰 VS токенов.")
+    await message.answer(f"✅ Пользователю {telegram_id} начислено {amount} 💵 VS токенов.")
 
 
 @dp.message(Command("setplus"))
