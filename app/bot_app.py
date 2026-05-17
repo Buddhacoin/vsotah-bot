@@ -53,6 +53,26 @@ from app.ai.file_router import (
 from app.ai.voice_router import transcribe_voice, text_to_speech, build_voice_user_message
 from app.ai.memory import build_dialogue_memory_note
 from app.referrals import build_referral_link, parse_referral_code, build_invite_text, build_telegram_share_url
+from app.economy import (
+    FREE_DAILY_LIMIT,
+    FREE_WEEKLY_LIMIT,
+    FREE_DAILY_IMAGE_LIMIT,
+    PLAN_DAILY_LIMITS,
+    PLAN_WEEKLY_LIMITS,
+    TARIFFS,
+    VS_TOKEN_PACKS,
+    REFERRAL_REWARDS,
+    referral_reward_title,
+    premium_text,
+    tariff_button_text,
+    period_button_text,
+    token_pack_button_text,
+    subscription_bonus_tokens,
+    plan_level,
+    model_required_plan,
+    has_model_access,
+    has_active_paid_subscription,
+)
 from app.performance import (
     init_performance_layer,
     cache_get,
@@ -111,58 +131,6 @@ ADMIN_IDS = {
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-
-FREE_DAILY_LIMIT = 15
-FREE_WEEKLY_LIMIT = 105
-FREE_DAILY_IMAGE_LIMIT = 5
-
-PLAN_WEEKLY_LIMITS = {
-    "FREE": 105,
-    "PLUS": 500,
-    "PRO": 1400,
-    "VIP": None,
-}
-
-TARIFFS = {
-    "PLUS": {
-        "title": "PLUS",
-        "description": "500 запросов в неделю",
-        "prices": {1: 199, 3: 400, 6: 800, 12: 1600},
-    },
-    "PRO": {
-        "title": "PRO",
-        "description": "1400 запросов в неделю",
-        "prices": {1: 499, 3: 1000, 6: 2000, 12: 3000},
-    },
-    "VIP": {
-        "title": "VIP",
-        "description": "Безлимит",
-        "prices": {1: 1499, 3: 3000, 6: 6000, 12: 9900},
-    },
-}
-
-REFERRAL_REWARDS = {
-    1: {"type": "requests", "amount": 50, "title": "+50 запросов"},
-    3: {"type": "plan_days", "plan": "PLUS", "days": 3, "title": "+3 дня PLUS"},
-    10: {"type": "plan_days", "plan": "PRO", "days": 5, "title": "+5 дней PRO"},
-    25: {"type": "plan_days", "plan": "VIP", "days": 7, "title": "VIP статус на 7 дней"},
-    100: {"type": "plan_days", "plan": "VIP", "days": 30, "title": "VIP статус на 30 дней"},
-}
-
-
-def referral_reward_title(milestone: int, reward_type: str | None = None, reward_value: str | None = None) -> str:
-    reward = REFERRAL_REWARDS.get(int(milestone))
-    if reward:
-        return reward["title"]
-
-    if reward_type == "requests" and reward_value:
-        return f"+{reward_value} запросов"
-
-    if reward_type == "plan_days" and reward_value and ":" in reward_value:
-        plan, days = reward_value.split(":", 1)
-        return f"+{days} дней {plan}"
-
-    return "бонус"
 
 SPAM_WINDOW_SECONDS = 8
 SPAM_MAX_MESSAGES = 5
@@ -228,14 +196,13 @@ def models_menu():
 
 
 def tariffs_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⭐ PLUS — 500 запросов / неделя", callback_data="tariff_PLUS")],
-            [InlineKeyboardButton(text="💎 PRO — 1400 запросов / неделя", callback_data="tariff_PRO")],
-            [InlineKeyboardButton(text="👑 VIP — безлимит", callback_data="tariff_VIP")],
-            [InlineKeyboardButton(text="← Назад", callback_data="back_main")],
-        ]
-    )
+    rows = [
+        [InlineKeyboardButton(text=tariff_button_text(plan), callback_data=f"tariff_{plan}")]
+        for plan in TARIFFS
+    ]
+    rows.append([InlineKeyboardButton(text="💰 Купить VS токены", callback_data="tokens_shop")])
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def channels_menu():
@@ -275,13 +242,12 @@ def referral_back_menu(bot_username: str, user_id: int):
     )
 
 def period_menu(plan: str):
-    prices = TARIFFS[plan]["prices"]
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"1 месяц — ⭐ {prices[1]}", callback_data=f"period_{plan}_1")],
-            [InlineKeyboardButton(text=f"3 месяца — ⭐ {prices[3]}", callback_data=f"period_{plan}_3")],
-            [InlineKeyboardButton(text=f"6 месяцев — ⭐ {prices[6]}", callback_data=f"period_{plan}_6")],
-            [InlineKeyboardButton(text=f"12 месяцев — ⭐ {prices[12]}", callback_data=f"period_{plan}_12")],
+            [InlineKeyboardButton(text=period_button_text(plan, 1), callback_data=f"period_{plan}_1")],
+            [InlineKeyboardButton(text=period_button_text(plan, 3), callback_data=f"period_{plan}_3")],
+            [InlineKeyboardButton(text=period_button_text(plan, 6), callback_data=f"period_{plan}_6")],
+            [InlineKeyboardButton(text=period_button_text(plan, 12), callback_data=f"period_{plan}_12")],
             [InlineKeyboardButton(text="← Назад", callback_data="premium")],
         ]
     )
@@ -297,6 +263,25 @@ def payment_method_menu(plan: str, months: int):
     )
 
 
+def tokens_shop_menu():
+    rows = [
+        [InlineKeyboardButton(text=token_pack_button_text(amount), callback_data=f"tokenpack_{amount}")]
+        for amount in VS_TOKEN_PACKS
+    ]
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data="premium")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def token_payment_menu(amount: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Карта / СБП — скоро", callback_data="rub_disabled")],
+            [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data=f"pay_tokens_{amount}")],
+            [InlineKeyboardButton(text="← Назад", callback_data="tokens_shop")],
+        ]
+    )
+
+
 def get_week_start():
     today = date.today()
     return today - timedelta(days=today.weekday())
@@ -308,34 +293,6 @@ def add_months_rough(months: int):
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
-
-
-PLAN_LEVELS = {
-    "FREE": 0,
-    "PLUS": 1,
-    "PRO": 2,
-    "VIP": 3,
-}
-
-MODEL_REQUIRED_PLAN = {
-    "gpt": "FREE",
-    "gemini": "FREE",
-    "claude": "FREE",
-    "nanobanana": "FREE",
-    "gptimage": "FREE",
-}
-
-
-def plan_level(plan: str | None) -> int:
-    return PLAN_LEVELS.get((plan or "FREE").upper(), 0)
-
-
-def model_required_plan(model: str) -> str:
-    return MODEL_REQUIRED_PLAN.get(model, "FREE")
-
-
-def has_model_access(user_plan: str | None, model: str) -> bool:
-    return plan_level(user_plan) >= plan_level(model_required_plan(model))
 
 
 def model_display_name(model: str) -> str:
@@ -383,32 +340,6 @@ def welcome_text():
 Напишите вопрос, отправьте фото или выберите действие ниже."""
 
 
-def premium_text():
-    return """💳 Купить подписку
-
-🟢 FREE
-• ChatGPT — GPT-5.1
-• Gemini — 3.1 Flash
-• Claude — Sonnet 4.6
-• Nano Banana Pro
-• GPT Image 2
-
-• 15 запросов в день
-• из них 5 Image
-• 105 запросов в неделю
-
-⭐ PLUS — 500 запросов в неделю
-• Все модели
-• больше лимитов
-
-💎 PRO — 1400 запросов в неделю
-• Все модели
-• больше лимитов
-
-👑 VIP — безлимит
-• Все модели
-• максимум возможностей"""
-
 def channels_text():
     return """🧠 Наши каналы:
 
@@ -442,6 +373,7 @@ async def init_db():
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_used INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_image_used INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_requests INTEGER DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vs_tokens INTEGER DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS day_start DATE DEFAULT CURRENT_DATE;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS week_start DATE DEFAULT CURRENT_DATE;")
 
@@ -469,6 +401,19 @@ async def init_db():
             );
         """)
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS months INTEGER DEFAULT 1;")
+        await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS item_type TEXT DEFAULT 'plan';")
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS token_transactions (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT NOT NULL,
+                amount INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                meta TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_token_transactions_telegram_id ON token_transactions(telegram_id);")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS spam_state (
@@ -644,7 +589,7 @@ async def apply_plan_days_bonus(telegram_id: int, bonus_plan: str, days: int):
 
 async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict, source_count: int) -> bool:
     reward_type = reward["type"]
-    if reward_type == "requests":
+    if reward_type in {"requests", "vs_tokens"}:
         reward_value = str(reward["amount"])
     else:
         reward_value = f"{reward['plan']}:{reward['days']}"
@@ -668,6 +613,18 @@ async def grant_referral_reward(referrer_id: int, milestone: int, reward: dict, 
                 SET bonus_requests = COALESCE(bonus_requests, 0) + $2
                 WHERE telegram_id=$1
             """, referrer_id, int(reward["amount"]))
+
+        if reward_type == "vs_tokens":
+            amount = int(reward["amount"])
+            await conn.execute("""
+                UPDATE users
+                SET vs_tokens = COALESCE(vs_tokens, 0) + $2
+                WHERE telegram_id=$1
+            """, referrer_id, amount)
+            await conn.execute("""
+                INSERT INTO token_transactions (telegram_id, amount, reason, meta)
+                VALUES ($1, $2, 'referral_reward', $3)
+            """, referrer_id, amount, f"milestone:{milestone}")
 
         await conn.execute("""
             UPDATE referrals
@@ -742,6 +699,7 @@ async def get_referral_stats(telegram_id: int) -> dict:
             paid = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='paid'", telegram_id)
             rewards_count = await conn.fetchval("SELECT COUNT(*) FROM referral_rewards WHERE referrer_id=$1", telegram_id)
             bonus_requests = await conn.fetchval("SELECT COALESCE(bonus_requests, 0) FROM users WHERE telegram_id=$1", telegram_id)
+            vs_tokens = await conn.fetchval("SELECT COALESCE(vs_tokens, 0) FROM users WHERE telegram_id=$1", telegram_id)
             rewards = await conn.fetch("""
                 SELECT milestone, reward_type, reward_value, COALESCE(reward_title, '') AS reward_title, created_at
                 FROM referral_rewards
@@ -754,11 +712,12 @@ async def get_referral_stats(telegram_id: int) -> dict:
             "pending_rewards": 0,
             "rewards_count": rewards_count or 0,
             "bonus_requests": bonus_requests or 0,
+            "vs_tokens": vs_tokens or 0,
             "rewards": rewards or [],
         }
     except Exception as e:
         print(f"REFERRAL STATS ERROR: {short_error_text(e)}")
-        return {"invited": 0, "paid": 0, "pending_rewards": 0, "rewards_count": 0, "bonus_requests": 0, "rewards": []}
+        return {"invited": 0, "paid": 0, "pending_rewards": 0, "rewards_count": 0, "bonus_requests": 0, "vs_tokens": 0, "rewards": []}
 
 
 def build_reward_history_lines(rewards) -> str:
@@ -787,13 +746,14 @@ async def build_referral_text(bot_obj: Bot, user_id: int) -> str:
         "📊 Твоя статистика:\n"
         f"• Приглашено: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
+        f"• 💰 VS токенов: {stats['vs_tokens']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Бонусы за приглашения:\n"
-        "• 1 друг → +50 запросов\n"
-        "• 3 друга → +3 дня PLUS\n"
-        "• 10 друзей → +5 дней PRO\n"
-        "• 25 друзей → VIP статус 7 дней\n"
-        "• 100 друзей → VIP статус 30 дней\n\n"
+        "• 1 друг → +20 💰 VS токенов\n"
+        "• 3 друга → +75 💰 VS токенов\n"
+        "• 10 друзей → +7 дней PLUS\n"
+        "• 25 друзей → +7 дней PRO\n"
+        "• 100 друзей → +30 дней PRO\n\n"
         "Бонусы выдаются автоматически внутри бота."
     )
 
@@ -816,6 +776,7 @@ async def build_referral_stats_text(user_id: int) -> str:
         "📊 Моя статистика партнёрки\n\n"
         f"• Приглашено всего: {stats['invited']}\n"
         f"• Купили подписку: {stats['paid']}\n"
+        f"• 💰 VS токенов сейчас: {stats['vs_tokens']}\n"
         f"• Бонусных запросов сейчас: {stats['bonus_requests']}\n"
         f"• Бонусов получено: {stats['rewards_count']}\n\n"
         "🎁 Уже получено:\n"
@@ -1026,9 +987,6 @@ async def check_limit(user):
     plan = user["plan"]
     bonus_requests = dict(user).get("bonus_requests") or 0
 
-    if plan == "VIP":
-        return True, None
-
     if bonus_requests > 0:
         return True, None
 
@@ -1038,6 +996,10 @@ async def check_limit(user):
         if user["weekly_used"] >= FREE_WEEKLY_LIMIT:
             return False, "FREE_WEEK_LIMIT"
         return True, None
+
+    daily_limit = PLAN_DAILY_LIMITS.get(plan)
+    if daily_limit is not None and user["daily_used"] >= daily_limit:
+        return False, f"{plan}_DAY_LIMIT"
 
     weekly_limit = PLAN_WEEKLY_LIMITS.get(plan)
     if weekly_limit is not None and user["weekly_used"] >= weekly_limit:
@@ -1136,32 +1098,52 @@ async def clear_chat(telegram_id):
 
 async def activate_plan(telegram_id: int, plan: str, months: int):
     until = add_months_rough(months)
+    bonus_tokens = subscription_bonus_tokens(plan, months)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE users
-            SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0, daily_image_used=0
+            SET plan=$2, plan_until=$3, daily_used=0, weekly_used=0, daily_image_used=0,
+                vs_tokens = COALESCE(vs_tokens, 0) + $4
             WHERE telegram_id=$1
-        """, telegram_id, plan, until)
-    await log_event(telegram_id, "activate_plan", f"{plan} {months} months")
+        """, telegram_id, plan, until, bonus_tokens)
+        if bonus_tokens:
+            await conn.execute("""
+                INSERT INTO token_transactions (telegram_id, amount, reason, meta)
+                VALUES ($1, $2, 'subscription_bonus', $3)
+            """, telegram_id, bonus_tokens, f"{plan}:{months}")
+    await log_event(telegram_id, "activate_plan", f"{plan} {months} months +{bonus_tokens} tokens")
+
+
+async def add_vs_tokens(telegram_id: int, amount: int, reason: str, meta: str = ""):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users
+            SET vs_tokens = COALESCE(vs_tokens, 0) + $2
+            WHERE telegram_id=$1
+        """, telegram_id, amount)
+        await conn.execute("""
+            INSERT INTO token_transactions (telegram_id, amount, reason, meta)
+            VALUES ($1, $2, $3, $4)
+        """, telegram_id, amount, reason, meta[:500])
+    await log_event(telegram_id, "vs_tokens_add", f"{amount} {reason} {meta}"[:900])
+
+
+async def can_use_vs_tokens(user) -> tuple[bool, str | None]:
+    if not has_active_paid_subscription(user):
+        return False, "Для использования 💰 VS токенов нужна активная подписка PLUS или PRO."
+    return True, None
 
 
 async def user_profile_text(user):
-    model_names = {
-        "gpt": "ChatGPT",
-        "claude": "Claude",
-        "gemini": "Gemini",
-        "nanobanana": "Nano Banana",
-        "gptimage": "GPT Image",
-        "deepseek": "DeepSeek",
-    }
-
     plan = user["plan"] or "FREE"
     current_model = model_display_name(user["selected_model"])
+    vs_tokens = dict(user).get("vs_tokens") or 0
 
-    if plan == "VIP":
-        usage_block = "Запросов: ♾ безлимит"
-    elif plan in {"PLUS", "PRO"}:
-        usage_block = f"Запросов в неделю: {user['weekly_used']}/{PLAN_WEEKLY_LIMITS[plan]}"
+    if plan in {"PLUS", "PRO"}:
+        usage_block = (
+            f"Запросов сегодня: {user['daily_used']}/{PLAN_DAILY_LIMITS[plan]}\n"
+            f"Запросов в неделю: {user['weekly_used']}/{PLAN_WEEKLY_LIMITS[plan]}"
+        )
     else:
         usage_block = (
             f"Запросов сегодня: {user['daily_used']}/{FREE_DAILY_LIMIT}\n"
@@ -1177,11 +1159,14 @@ async def user_profile_text(user):
         f"📊 Статистика использования\n\n"
         f"{usage_block}\n\n"
         f"Подписка: {plan}\n"
+        f"💰 VS токены: {vs_tokens}\n"
         f"Выбрана модель: {current_model}\n\n"
     )
 
     if plan != "FREE" and user["plan_until"]:
         text += f"Активна до: {user['plan_until'].strftime('%d.%m.%Y')}\n\n"
+    elif vs_tokens > 0:
+        text += "💰 VS токены сохраняются, но использовать их можно только при активной подписке.\n\n"
 
     referral_stats = await get_referral_stats(user["telegram_id"])
     text += (
@@ -1192,10 +1177,10 @@ async def user_profile_text(user):
     )
 
     text += (
-        "Нужно больше? 🚀 Выберите тариф для покупки Premium:\n\n"
-        "⭐ PLUS — Claude Sonnet и 500 запросов в неделю\n"
-        "💎 PRO — Nano Banana Pro и 1400 запросов в неделю\n"
-        "👑 VIP — GPT Image и безлимит"
+        "Нужно больше? 🚀 Выберите тариф или купите 💰 VS токены:\n\n"
+        "⭐ PLUS — до 100 запросов в день +100 💰 VS токенов\n"
+        "💎 PRO — до 200 запросов в день +300 💰 VS токенов\n"
+        "💰 VS токены — для изображений, видео, voice и premium generation"
     )
     return text
 
@@ -1222,25 +1207,17 @@ async def download_telegram_document(message: Message) -> tuple[str, bytes]:
 
 
 async def download_telegram_voice(message: Message) -> tuple[str, bytes]:
-    """Download Telegram voice notes and regular audio files for STT.
+    voice = message.voice
 
-    Telegram sends microphone messages as message.voice, but users can also
-    attach an audio file. The old handler only accepted voice notes, so audio
-    files fell into the wrong path or failed before transcription.
-    """
-    media = message.voice or message.audio
-
-    if not media:
+    if not voice:
         raise ValueError("VOICE_NOT_FOUND")
-    if media.file_size and media.file_size > MAX_VOICE_SIZE:
+    if voice.file_size and voice.file_size > MAX_VOICE_SIZE:
         raise ValueError("VOICE_TOO_LARGE")
 
-    file = await bot.get_file(media.file_id)
+    file = await bot.get_file(voice.file_id)
     buffer = BytesIO()
     await bot.download_file(file.file_path, destination=buffer)
-
-    filename = getattr(media, "file_name", None) or "voice.ogg"
-    return filename, buffer.getvalue()
+    return "voice.ogg", buffer.getvalue()
 
 
 # File extraction lives in app/ai/file_router.py.
@@ -1588,7 +1565,7 @@ async def tariff_callback(callback: CallbackQuery):
     tariff = TARIFFS[plan]
     await safe_edit_or_send(
         callback,
-        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nВыберите период подписки:",
+        f"🚀 {tariff['title']}\n\n{tariff['description']}\n\nБонус: +{tariff['bonus_tokens']} 💰 VS токенов\n\nВыберите период подписки:",
         reply_markup=period_menu(plan),
     )
 
@@ -1601,11 +1578,41 @@ async def period_callback(callback: CallbackQuery):
     if plan not in TARIFFS:
         return
     price = TARIFFS[plan]["prices"][months]
+    rub_price = TARIFFS[plan]["rub_prices"][months]
     await log_event(callback.from_user.id, "period_select", f"{plan} {months}")
     await safe_edit_or_send(
         callback,
-        f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена в Stars: ⭐ {price}",
+        f"💳 Выберите способ оплаты:\n\nТариф: {plan}\nПериод: {months} мес.\nЦена: ⭐ {price} / {rub_price} ₽\nБонус: +{TARIFFS[plan]['bonus_tokens']} 💰 VS токенов",
         reply_markup=payment_method_menu(plan, months),
+    )
+
+
+@dp.callback_query(F.data == "tokens_shop")
+async def tokens_shop_callback(callback: CallbackQuery):
+    await callback.answer()
+    await log_event(callback.from_user.id, "tokens_shop_open")
+    await safe_edit_or_send(
+        callback,
+        "💰 Купить VS токены\n\n"
+        "VS токены тратятся на изображения, редактирование фото, видео AI, voice, большие документы и premium generation.\n\n"
+        "Важно: использовать 💰 VS токены можно только при активной подписке PLUS или PRO.\n\n"
+        "Выберите пакет:",
+        reply_markup=tokens_shop_menu(),
+    )
+
+
+@dp.callback_query(F.data.startswith("tokenpack_"))
+async def tokenpack_callback(callback: CallbackQuery):
+    await callback.answer()
+    amount = int(callback.data.replace("tokenpack_", ""))
+    if amount not in VS_TOKEN_PACKS:
+        return
+    pack = VS_TOKEN_PACKS[amount]
+    await log_event(callback.from_user.id, "tokenpack_select", str(amount))
+    await safe_edit_or_send(
+        callback,
+        f"💰 Пакет VS токенов\n\nКоличество: {amount}\nЦена: ⭐ {pack['stars']} / {pack['rub']} ₽\n\nТокены сохраняются на балансе, но тратить их можно только при активной подписке.",
+        reply_markup=token_payment_menu(amount),
     )
 
 
@@ -1635,10 +1642,30 @@ async def pay_stars_callback(callback: CallbackQuery):
     )
 
 
+@dp.callback_query(F.data.startswith("pay_tokens_"))
+async def pay_tokens_callback(callback: CallbackQuery):
+    await callback.answer()
+    amount = int(callback.data.replace("pay_tokens_", ""))
+    if amount not in VS_TOKEN_PACKS:
+        return
+    pack = VS_TOKEN_PACKS[amount]
+    payload = f"tokens:{amount}:user:{callback.from_user.id}:ts:{int(time.time())}"
+    await log_event(callback.from_user.id, "tokens_invoice_open", f"{amount} {pack['stars']}")
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title=f"{amount} VS токенов",
+        description="💰 VS токены для изображений, видео AI, voice и premium generation.",
+        payload=payload,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{amount} VS токенов", amount=pack['stars'])],
+    )
+
+
 @dp.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
     payload = pre_checkout_query.invoice_payload
-    if not payload.startswith("plan:"):
+    if not (payload.startswith("plan:") or payload.startswith("tokens:")):
         await pre_checkout_query.answer(ok=False, error_message="Некорректный платёж.")
         return
     await pre_checkout_query.answer(ok=True)
@@ -1649,6 +1676,38 @@ async def successful_payment_handler(message: Message):
     payment = message.successful_payment
     payload = payment.invoice_payload
     parts = payload.split(":")
+    if payload.startswith("tokens:"):
+        try:
+            amount_tokens = int(parts[1])
+        except Exception:
+            await message.answer("⚠️ Платёж получен, но пакет токенов не распознан. Напишите администратору.")
+            return
+
+        if amount_tokens not in VS_TOKEN_PACKS:
+            await message.answer("⚠️ Платёж получен, но пакет токенов не найден. Напишите администратору.")
+            return
+
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO payments (
+                    telegram_id, plan, months, amount, currency, payload,
+                    telegram_payment_charge_id, provider_payment_charge_id, item_type
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'tokens')
+            """,
+                message.from_user.id,
+                f"TOKENS_{amount_tokens}",
+                0,
+                payment.total_amount,
+                payment.currency,
+                payload,
+                payment.telegram_payment_charge_id,
+                payment.provider_payment_charge_id,
+            )
+
+        await add_vs_tokens(message.from_user.id, amount_tokens, "token_purchase", payload)
+        await message.answer(f"✅ Оплата прошла успешно!\n\nНа баланс начислено: +{amount_tokens} 💰 VS токенов", reply_markup=main_menu())
+        return
+
     plan = None
     months = 1
     try:
@@ -1692,7 +1751,11 @@ async def successful_payment_handler(message: Message):
         except Exception:
             pass
 
-    await message.answer(f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.", reply_markup=main_menu())
+    bonus_tokens = subscription_bonus_tokens(plan, months)
+    await message.answer(
+        f"✅ Оплата прошла успешно!\n\nТариф {plan} активирован на {months} мес.\nНачислено: +{bonus_tokens} 💰 VS токенов",
+        reply_markup=main_menu(),
+    )
 
 
 @dp.callback_query(F.data.startswith("set_model_"))
@@ -1750,10 +1813,10 @@ async def admin_handler(message: Message):
         "/refstats — партнёрка\n"
         "/health — статус сервиса\n"
         "/errors — ошибки и лимиты\n"
-        "/setplus telegram_id\n"
-        "/setpro telegram_id\n"
-        "/setvip telegram_id\n"
-        "/setfree telegram_id"
+        "/setplus telegram_id — выдать PLUS на 1 месяц\n"
+        "/setpro telegram_id — выдать PRO на 1 месяц\n"
+        "/setfree telegram_id — снять подписку\n"
+        "/addtokens telegram_id amount — выдать 💰 VS токены"
     )
 
 
@@ -1806,7 +1869,6 @@ async def stats_handler(message: Message):
         voice_requests = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='ai_voice'")
         plus_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PLUS'")
         pro_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='PRO'")
-        vip_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan='VIP'")
         premium_clicks = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type IN ('premium_click', 'premium_open')")
         invoices = await conn.fetchval("SELECT COUNT(*) FROM events WHERE event_type='invoice_open'")
         payments_count = await conn.fetchval("SELECT COUNT(*) FROM payments")
@@ -1856,7 +1918,7 @@ async def stats_handler(message: Message):
         f"🎙 Voice-запросов всего: {voice_requests}\n\n"
         f"⭐ PLUS: {plus_users}\n"
         f"💎 PRO: {pro_users}\n"
-        f"👑 VIP: {vip_users}\n\n"
+        f"💰 Новая экономика: PLUS / PRO + VS токены\n\n"
         f"💳 Открытий премиума: {premium_clicks}\n"
         f"⭐ Открытий оплаты Stars: {invoices}\n"
         f"✅ Платежей: {payments_count}\n"
@@ -2090,7 +2152,7 @@ async def users_handler(message: Message):
 
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT telegram_id, username, first_name, plan, weekly_used, created_at
+            SELECT telegram_id, username, first_name, plan, weekly_used, COALESCE(vs_tokens, 0) AS vs_tokens, created_at
             FROM users ORDER BY created_at DESC LIMIT 15
         """)
 
@@ -2102,6 +2164,7 @@ async def users_handler(message: Message):
             f"Имя: {name}\n"
             f"Тариф: {row['plan']}\n"
             f"Запросов за неделю: {row['weekly_used']}\n"
+            f"💰 VS токены: {row['vs_tokens']}\n"
             f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
     await message.answer(text[:3900])
@@ -2114,7 +2177,7 @@ async def payments_handler(message: Message):
 
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT telegram_id, plan, months, amount, currency, created_at
+            SELECT telegram_id, plan, months, amount, currency, COALESCE(item_type, 'plan') AS item_type, created_at
             FROM payments ORDER BY created_at DESC LIMIT 15
         """)
 
@@ -2126,7 +2189,8 @@ async def payments_handler(message: Message):
     for row in rows:
         text += (
             f"ID: {row['telegram_id']}\n"
-            f"Тариф: {row['plan']} на {row['months']} мес.\n"
+            f"Тип: {row['item_type']}\n"
+            f"Тариф/пакет: {row['plan']} на {row['months']} мес.\n"
             f"Сумма: {row['amount']} {row['currency']}\n"
             f"Дата: {row['created_at'].strftime('%d.%m %H:%M')}\n\n"
         )
@@ -2144,12 +2208,39 @@ async def admin_set_plan(message: Message, plan: str):
 
     telegram_id = int(parts[1])
     until = add_months_rough(1) if plan != "FREE" else None
+    bonus_tokens = subscription_bonus_tokens(plan, 1) if plan != "FREE" else 0
 
     async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE users SET plan=$2, plan_until=$3 WHERE telegram_id=$1", telegram_id, plan, until)
+        await conn.execute("""
+            UPDATE users
+            SET plan=$2, plan_until=$3, vs_tokens = COALESCE(vs_tokens, 0) + $4
+            WHERE telegram_id=$1
+        """, telegram_id, plan, until, bonus_tokens)
+        if bonus_tokens:
+            await conn.execute("""
+                INSERT INTO token_transactions (telegram_id, amount, reason, meta)
+                VALUES ($1, $2, 'admin_plan_bonus', $3)
+            """, telegram_id, bonus_tokens, plan)
 
-    await log_event(telegram_id, "admin_set_plan", plan)
-    await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}.")
+    await log_event(telegram_id, "admin_set_plan", f"{plan} +{bonus_tokens} tokens")
+    suffix = f" и начислено +{bonus_tokens} 💰 VS токенов" if bonus_tokens else ""
+    await message.answer(f"✅ Пользователю {telegram_id} установлен тариф {plan}{suffix}.")
+
+
+@dp.message(Command("addtokens"))
+async def addtokens_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].lstrip("-").isdigit():
+        await message.answer("Формат команды: /addtokens telegram_id amount")
+        return
+
+    telegram_id = int(parts[1])
+    amount = int(parts[2])
+    await add_vs_tokens(telegram_id, amount, "admin_addtokens", f"by:{message.from_user.id}")
+    await message.answer(f"✅ Пользователю {telegram_id} начислено {amount} 💰 VS токенов.")
 
 
 @dp.message(Command("setplus"))
@@ -2164,7 +2255,9 @@ async def setpro_handler(message: Message):
 
 @dp.message(Command("setvip"))
 async def setvip_handler(message: Message):
-    await admin_set_plan(message, "VIP")
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("VIP сейчас убран из публичной экономики. Используйте /setpro telegram_id.")
 
 
 @dp.message(Command("setfree"))
@@ -2200,7 +2293,7 @@ async def run_work_ai_command(message: Message, mode: str, router_func, title: s
     allowed, reason = await check_limit(user)
     if not allowed:
         await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS или PRO.", reply_markup=tariffs_menu())
         return
 
     selected_model = user["selected_model"]
@@ -2309,7 +2402,7 @@ async def photo_handler(message: Message):
     allowed, reason = await check_limit(user)
     if not allowed:
         await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS или PRO.", reply_markup=tariffs_menu())
         return
 
     selected_model = user["selected_model"]
@@ -2326,7 +2419,7 @@ async def photo_handler(message: Message):
         await log_event(message.from_user.id, "limit_reached", "FREE_IMAGE_DAY_LIMIT")
         await message.answer(
             "🖼 Вы исчерпали бесплатный лимит генерации изображений.\n\n"
-            "FREE: 5 Image в день. Перейдите на PLUS, PRO или VIP, чтобы получить больше лимитов.",
+            "FREE: 3 Image в день. Перейдите на PLUS или PRO, чтобы получить больше лимитов.",
             reply_markup=tariffs_menu(),
         )
         return
@@ -2478,7 +2571,7 @@ async def document_handler(message: Message):
     allowed, reason = await check_limit(user)
     if not allowed:
         await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS или PRO.", reply_markup=tariffs_menu())
         return
 
     selected_model = user["selected_model"]
@@ -2498,7 +2591,6 @@ async def document_handler(message: Message):
         )
 
     wait_message = await message.answer("📎 Читаю файл...")
-    loading_task = None
 
     try:
         filename, file_bytes = await download_telegram_document(message)
@@ -2541,7 +2633,6 @@ async def document_handler(message: Message):
                 return
         else:
             await wait_message.edit_text(build_file_status_text(filename, "analyzing"))
-            loading_task = asyncio.create_task(animate_thinking(wait_message, "📎 Анализирую файл"))
             answer = await file_router(selected_model, question, filename, extracted_text, history)
 
         if not answer:
@@ -2568,15 +2659,6 @@ async def document_handler(message: Message):
                 await message.answer(answer[i:i + 3900])
 
     except Exception as e:
-        if loading_task:
-            loading_task.cancel()
-            try:
-                await loading_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-
         admin_error = short_error_text(e)
         print(f"FILE ERROR SHORT:\n{admin_error}")
         print(f"FILE ERROR TRACE:\n{traceback.format_exc()}")
@@ -2646,7 +2728,7 @@ async def send_fast_voice_reply(message: Message, answer: str):
                 pass
 
 
-@dp.message(F.voice | F.audio)
+@dp.message(F.voice)
 async def voice_handler(message: Message):
     """Voice AI 2.0: free voice assistant for all users.
 
@@ -2671,30 +2753,23 @@ async def voice_handler(message: Message):
             await conn.execute("UPDATE users SET selected_model='gpt' WHERE telegram_id=$1", message.from_user.id)
         await message.answer("ℹ️ Для голосового AI я переключил модель на ChatGPT.")
 
-    wait_message = await message.answer("🎧 Распознаю речь...")
-    loading_task = asyncio.create_task(animate_thinking(wait_message, "🎧 Распознаю речь"))
+    wait_message = await message.answer("🎙 Слушаю голосовое...")
 
     try:
         filename, audio_bytes = await download_telegram_voice(message)
+
+        await wait_message.edit_text("🎧 Распознаю речь...")
         transcript = await transcribe_voice(audio_bytes, filename)
 
         if not transcript:
             await wait_message.edit_text(
-                "⚠️ Не удалось распознать аудио. Попробуйте записать ещё раз или отправьте текстом.",
+                "⚠️ Не удалось распознать голосовое. Попробуйте записать ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
             return
 
         await save_message(message.from_user.id, "user", build_voice_user_message(transcript))
         history = await get_chat_history(message.from_user.id)
-
-        loading_task.cancel()
-        try:
-            await loading_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
 
         await wait_message.edit_text("Печатает ответ...")
         loading_task = asyncio.create_task(animate_thinking(wait_message, "Печатает ответ"))
@@ -2731,29 +2806,13 @@ async def voice_handler(message: Message):
             asyncio.create_task(send_fast_voice_reply(message, answer))
 
     except ValueError as e:
-        if loading_task:
-            loading_task.cancel()
-            try:
-                await loading_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
         error_code = str(e)
         if error_code == "VOICE_TOO_LARGE":
-            await wait_message.edit_text("⚠️ Аудио слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
+            await wait_message.edit_text("⚠️ Голосовое слишком большое. Сейчас лимит — до 20 МБ.", reply_markup=main_menu())
         else:
-            await wait_message.edit_text("⚠️ Не удалось скачать аудио. Попробуйте ещё раз.", reply_markup=main_menu())
+            await wait_message.edit_text("⚠️ Не удалось скачать голосовое. Попробуйте ещё раз.", reply_markup=main_menu())
 
     except Exception as e:
-        if loading_task:
-            loading_task.cancel()
-            try:
-                await loading_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
         admin_error = short_error_text(e)
         print(f"VOICE ERROR SHORT:\n{admin_error}")
         print(f"VOICE ERROR TRACE:\n{traceback.format_exc()}")
@@ -2762,12 +2821,12 @@ async def voice_handler(message: Message):
 
         try:
             await wait_message.edit_text(
-                "⚠️ Не удалось обработать аудио. Попробуйте ещё раз или отправьте текстом.",
+                "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
         except Exception:
             await message.answer(
-                "⚠️ Не удалось обработать аудио. Попробуйте ещё раз или отправьте текстом.",
+                "⚠️ Не удалось обработать голосовое. Попробуйте ещё раз или отправьте текстом.",
                 reply_markup=main_menu(),
             )
 
@@ -2787,7 +2846,7 @@ async def chat_handler(message: Message):
     allowed, reason = await check_limit(user)
     if not allowed:
         await log_event(message.from_user.id, "limit_reached", reason)
-        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS, PRO или VIP.", reply_markup=tariffs_menu())
+        await message.answer("⏳ Лимит сообщений закончился.\n\nВы можете перейти на PLUS или PRO.", reply_markup=tariffs_menu())
         return
 
     selected_model = user["selected_model"]
@@ -2804,7 +2863,7 @@ async def chat_handler(message: Message):
             await log_event(message.from_user.id, "limit_reached", "FREE_IMAGE_DAY_LIMIT")
             await message.answer(
                 "🖼 Вы исчерпали бесплатный лимит генерации изображений.\n\n"
-                "FREE: 5 Image в день. Перейдите на PLUS, PRO или VIP, чтобы получить больше лимитов.",
+                "FREE: 3 Image в день. Перейдите на PLUS или PRO, чтобы получить больше лимитов.",
                 reply_markup=tariffs_menu(),
             )
             return
